@@ -11,8 +11,14 @@ app = FastAPI(title="Telegram Marketplace API")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=[
+        "https://p0werful3.github.io",
+        "https://telegram-marketplace-api.onrender.com",
+        "https://web.telegram.org",
+        "https://web.telegram.org.a",
+        "*",
+    ],
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
