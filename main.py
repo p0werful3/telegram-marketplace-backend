@@ -1,6 +1,7 @@
 from fastapi import FastAPI, Depends, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
+from passlib.context import CryptContext
 
 from database import engine, get_db
 import models
@@ -16,7 +17,17 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
 models.Base.metadata.create_all(bind=engine)
+
+
+def hash_password(password: str) -> str:
+    return pwd_context.hash(password)
+
+
+def verify_password(password: str, password_hash: str) -> bool:
+    return pwd_context.verify(password, password_hash)
 
 
 @app.get("/")
@@ -24,22 +35,17 @@ def root():
     return {"message": "Telegram Marketplace API працює"}
 
 
-@app.post("/users/register", response_model=schemas.UserResponse)
+@app.post("/auth/register", response_model=schemas.UserResponse)
 def register_user(user: schemas.UserCreate, db: Session = Depends(get_db)):
-    existing_user = db.query(models.User).filter(models.User.telegram_id == user.telegram_id).first()
-
+    existing_user = db.query(models.User).filter(models.User.username == user.username).first()
     if existing_user:
-        if user.username:
-            existing_user.username = user.username
-        existing_user.full_name = user.full_name
-        db.commit()
-        db.refresh(existing_user)
-        return existing_user
+        raise HTTPException(status_code=400, detail="Користувач з таким username вже існує")
 
     new_user = models.User(
         telegram_id=user.telegram_id,
         username=user.username,
-        full_name=user.full_name
+        full_name=user.full_name,
+        password_hash=hash_password(user.password)
     )
     db.add(new_user)
     db.commit()
@@ -47,9 +53,57 @@ def register_user(user: schemas.UserCreate, db: Session = Depends(get_db)):
     return new_user
 
 
-@app.get("/users/{telegram_id}", response_model=schemas.UserResponse)
-def get_user(telegram_id: str, db: Session = Depends(get_db)):
-    user = db.query(models.User).filter(models.User.telegram_id == telegram_id).first()
+@app.post("/auth/login", response_model=schemas.UserResponse)
+def login_user(data: schemas.UserLogin, db: Session = Depends(get_db)):
+    user = db.query(models.User).filter(models.User.username == data.username).first()
+
+    if not user or not user.password_hash:
+        raise HTTPException(status_code=401, detail="Невірний username або password")
+
+    if not verify_password(data.password, user.password_hash):
+        raise HTTPException(status_code=401, detail="Невірний username або password")
+
+    return user
+
+
+@app.post("/auth/telegram", response_model=schemas.UserResponse)
+def telegram_login(data: schemas.TelegramLogin, db: Session = Depends(get_db)):
+    if not data.username:
+        raise HTTPException(status_code=400, detail="У Telegram акаунта немає username")
+
+    user = db.query(models.User).filter(models.User.telegram_id == data.telegram_id).first()
+
+    if user:
+        user.username = data.username
+        user.full_name = data.full_name
+        db.commit()
+        db.refresh(user)
+        return user
+
+    existing_username = db.query(models.User).filter(models.User.username == data.username).first()
+    if existing_username:
+        existing_username.telegram_id = data.telegram_id
+        if data.full_name:
+            existing_username.full_name = data.full_name
+        db.commit()
+        db.refresh(existing_username)
+        return existing_username
+
+    new_user = models.User(
+        telegram_id=data.telegram_id,
+        username=data.username,
+        full_name=data.full_name,
+        password_hash=None
+    )
+    db.add(new_user)
+    db.commit()
+    db.refresh(new_user)
+    return new_user
+
+
+@app.get("/users/{user_id}", response_model=schemas.UserResponse)
+def get_user(user_id: int, db: Session = Depends(get_db)):
+    user = db.query(models.User).filter(models.User.id == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="Користувача не знайдено")
     return user
@@ -57,7 +111,7 @@ def get_user(telegram_id: str, db: Session = Depends(get_db)):
 
 @app.post("/products")
 def create_product(product: schemas.ProductCreate, db: Session = Depends(get_db)):
-    seller = db.query(models.User).filter(models.User.telegram_id == product.seller_telegram_id).first()
+    seller = db.query(models.User).filter(models.User.id == product.seller_id).first()
 
     if not seller:
         raise HTTPException(status_code=404, detail="Продавця не знайдено")
@@ -75,10 +129,7 @@ def create_product(product: schemas.ProductCreate, db: Session = Depends(get_db)
     db.commit()
     db.refresh(new_product)
 
-    return {
-        "message": "Товар створено",
-        "product_id": new_product.id
-    }
+    return {"message": "Товар створено", "product_id": new_product.id}
 
 
 @app.get("/products")
@@ -109,16 +160,15 @@ def get_products(
             "image_url": product.image_url,
             "seller_username": seller.username if seller else None,
             "seller_name": seller.full_name if seller else None,
-            "seller_telegram_link": f"https://t.me/{seller.username}" if seller and seller.username else None,
-            "is_owner": False
+            "seller_telegram_link": f"https://t.me/{seller.username}" if seller and seller.username else None
         })
 
     return result
 
 
-@app.get("/users/{telegram_id}/products")
-def get_my_products(telegram_id: str, db: Session = Depends(get_db)):
-    user = db.query(models.User).filter(models.User.telegram_id == telegram_id).first()
+@app.get("/users/{user_id}/products")
+def get_my_products(user_id: int, db: Session = Depends(get_db)):
+    user = db.query(models.User).filter(models.User.id == user_id).first()
 
     if not user:
         raise HTTPException(status_code=404, detail="Користувача не знайдено")
@@ -146,22 +196,13 @@ def get_my_products(telegram_id: str, db: Session = Depends(get_db)):
 
 
 @app.delete("/products/{product_id}")
-def delete_product(
-    product_id: int,
-    telegram_id: str = Query(...),
-    db: Session = Depends(get_db)
-):
-    user = db.query(models.User).filter(models.User.telegram_id == telegram_id).first()
-
-    if not user:
-        raise HTTPException(status_code=404, detail="Користувача не знайдено")
-
+def delete_product(product_id: int, user_id: int = Query(...), db: Session = Depends(get_db)):
     product = db.query(models.Product).filter(models.Product.id == product_id).first()
 
     if not product:
         raise HTTPException(status_code=404, detail="Товар не знайдено")
 
-    if product.seller_id != user.id:
+    if product.seller_id != user_id:
         raise HTTPException(status_code=403, detail="Це не ваше оголошення")
 
     product.is_active = False
@@ -172,7 +213,7 @@ def delete_product(
 
 @app.post("/cart/add")
 def add_to_cart(data: schemas.CartAdd, db: Session = Depends(get_db)):
-    user = db.query(models.User).filter(models.User.telegram_id == data.user_telegram_id).first()
+    user = db.query(models.User).filter(models.User.id == data.user_id).first()
     product = db.query(models.Product).filter(models.Product.id == data.product_id).first()
 
     if not user:
@@ -181,19 +222,16 @@ def add_to_cart(data: schemas.CartAdd, db: Session = Depends(get_db)):
     if not product or not product.is_active:
         raise HTTPException(status_code=404, detail="Товар не знайдено")
 
-    cart_item = models.CartItem(
-        user_id=user.id,
-        product_id=product.id
-    )
+    cart_item = models.CartItem(user_id=user.id, product_id=product.id)
     db.add(cart_item)
     db.commit()
 
     return {"message": "Товар додано до кошика"}
 
 
-@app.get("/cart/{telegram_id}")
-def get_cart(telegram_id: str, db: Session = Depends(get_db)):
-    user = db.query(models.User).filter(models.User.telegram_id == telegram_id).first()
+@app.get("/cart/{user_id}")
+def get_cart(user_id: int, db: Session = Depends(get_db)):
+    user = db.query(models.User).filter(models.User.id == user_id).first()
 
     if not user:
         raise HTTPException(status_code=404, detail="Користувача не знайдено")
@@ -204,7 +242,11 @@ def get_cart(telegram_id: str, db: Session = Depends(get_db)):
     total = 0
 
     for item in cart_items:
-        product = db.query(models.Product).filter(models.Product.id == item.product_id, models.Product.is_active == True).first()
+        product = db.query(models.Product).filter(
+            models.Product.id == item.product_id,
+            models.Product.is_active == True
+        ).first()
+
         if product:
             seller = db.query(models.User).filter(models.User.id == product.seller_id).first()
             total += product.price
@@ -217,16 +259,16 @@ def get_cart(telegram_id: str, db: Session = Depends(get_db)):
                 "seller_link": f"https://t.me/{seller.username}" if seller and seller.username else None
             })
 
-    return {
-        "items": result,
-        "total": total
-    }
+    return {"items": result, "total": total}
 
 
 @app.post("/orders/buy")
 def buy_product(data: schemas.OrderCreate, db: Session = Depends(get_db)):
-    buyer = db.query(models.User).filter(models.User.telegram_id == data.buyer_telegram_id).first()
-    product = db.query(models.Product).filter(models.Product.id == data.product_id, models.Product.is_active == True).first()
+    buyer = db.query(models.User).filter(models.User.id == data.buyer_id).first()
+    product = db.query(models.Product).filter(
+        models.Product.id == data.product_id,
+        models.Product.is_active == True
+    ).first()
 
     if not buyer:
         raise HTTPException(status_code=404, detail="Покупця не знайдено")
