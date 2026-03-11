@@ -2,6 +2,6 @@ fastapi
 uvicorn
 sqlalchemy
 psycopg2-binary
-aiogram
 python-multipart
 pydantic
+passlib[bcrypt]
