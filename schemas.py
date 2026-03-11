@@ -2,49 +2,47 @@ from pydantic import BaseModel
 
 
 class UserCreate(BaseModel):
+    username: str
+    password: str
+    full_name: str | None = None
+    telegram_id: str | None = None
+
+
+class UserLogin(BaseModel):
+    username: str
+    password: str
+
+
+class TelegramLogin(BaseModel):
     telegram_id: str
     username: str | None = None
-    full_name: str
+    full_name: str | None = None
 
 
 class UserResponse(BaseModel):
     id: int
-    telegram_id: str
-    username: str | None = None
-    full_name: str
+    telegram_id: str | None = None
+    username: str
+    full_name: str | None = None
 
     class Config:
         from_attributes = True
 
 
 class ProductCreate(BaseModel):
-    seller_telegram_id: str
-    title: str
-    description: str
-    price: float
-    category: str
-    image_url: str | None = None
-
-
-class ProductResponse(BaseModel):
-    id: int
     seller_id: int
     title: str
     description: str
     price: float
     category: str
     image_url: str | None = None
-    is_active: bool
-
-    class Config:
-        from_attributes = True
 
 
 class CartAdd(BaseModel):
-    user_telegram_id: str
+    user_id: int
     product_id: int
 
 
 class OrderCreate(BaseModel):
-    buyer_telegram_id: str
+    buyer_id: int
     product_id: int
