@@ -1,4 +1,5 @@
 from fastapi import FastAPI, Depends, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 
 from database import engine, get_db
@@ -6,6 +7,18 @@ import models
 import schemas
 
 app = FastAPI(title="Telegram Marketplace API")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "https://p0werful3.github.io",
+        "https://p0werful3.github.io/telegram-marketplace-miniapp",
+        "*"
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 models.Base.metadata.create_all(bind=engine)
 
