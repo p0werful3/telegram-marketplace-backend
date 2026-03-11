@@ -7,9 +7,10 @@ class User(Base):
     __tablename__ = "users"
 
     id = Column(Integer, primary_key=True, index=True)
-    telegram_id = Column(String, unique=True, nullable=False, index=True)
-    username = Column(String, unique=True, nullable=True)
-    full_name = Column(String, nullable=False)
+    telegram_id = Column(String, unique=True, nullable=True, index=True)
+    username = Column(String, unique=True, nullable=False, index=True)
+    full_name = Column(String, nullable=True)
+    password_hash = Column(String, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
 
