@@ -19,7 +19,6 @@ app.add_middleware(
     expose_headers=["*"],
 )
 
-
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 models.Base.metadata.create_all(bind=engine)
