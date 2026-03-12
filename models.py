@@ -4,7 +4,7 @@ from database import Base
 
 
 class User(Base):
-    __tablename__ = "users_new"
+    __tablename__ = "users"
 
     id = Column(Integer, primary_key=True, index=True)
     telegram_id = Column(String, unique=True, nullable=True, index=True)
@@ -46,4 +46,3 @@ class Order(Base):
     seller_username = Column(String, nullable=True)
     seller_link = Column(String, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
-
