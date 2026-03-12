@@ -2,6 +2,9 @@ from typing import Optional, Literal, List
 from pydantic import BaseModel, Field
 
 
+CurrencyType = Literal["USD", "UAH", "EUR"]
+
+
 class UserCreate(BaseModel):
     username: str = Field(min_length=3, max_length=50)
     password: str = Field(min_length=4, max_length=128)
@@ -20,6 +23,13 @@ class TelegramLogin(BaseModel):
     full_name: Optional[str] = Field(default=None, max_length=100)
 
 
+
+
+class UserProfileUpdate(BaseModel):
+    username: str = Field(min_length=3, max_length=50)
+    full_name: Optional[str] = Field(default=None, max_length=100)
+    password: Optional[str] = Field(default=None, min_length=4, max_length=128)
+
 class UserResponse(BaseModel):
     id: int
     telegram_id: Optional[str]
@@ -35,7 +45,7 @@ class ProductCreate(BaseModel):
     title: str = Field(min_length=2, max_length=150)
     description: str = Field(min_length=5, max_length=3000)
     price: float
-    currency: Literal["USD", "UAH", "EUR"]
+    currency: CurrencyType = "USD"
     category: str = Field(min_length=1, max_length=100)
     condition: Literal["Новий", "Б/У"]
     city: str = Field(min_length=1, max_length=100)
@@ -43,12 +53,16 @@ class ProductCreate(BaseModel):
     image_urls: List[str] = Field(default_factory=list, max_length=10)
 
 
+class ProductUpdate(ProductCreate):
+    pass
+
+
 class ProductResponse(BaseModel):
     id: int
     title: str
     description: str
     price: float
-    currency: str
+    currency: CurrencyType = "USD"
     category: str
     condition: str
     city: str
@@ -74,6 +88,11 @@ class CartAdd(BaseModel):
 class OrderCreate(BaseModel):
     buyer_id: int
     product_id: int
+
+
+class OrderDecision(BaseModel):
+    seller_id: int
+    approve: bool
 
 
 class FavoriteCreate(BaseModel):
