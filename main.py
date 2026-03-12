@@ -19,7 +19,7 @@ app.add_middleware(
     expose_headers=["*"],
 )
 
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+pwd_context = CryptContext(schemes=["pbkdf2_sha256"], deprecated="auto")
 
 models.Base.metadata.create_all(bind=engine)
 
@@ -305,5 +305,6 @@ def buy_product(data: schemas.OrderCreate, db: Session = Depends(get_db)):
         "seller_username": seller_username,
         "seller_link": seller_link
     }
+
 
 
