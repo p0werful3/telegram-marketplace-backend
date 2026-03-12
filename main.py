@@ -12,12 +12,17 @@ app = FastAPI(title="Telegram Marketplace API")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_origin_regex=".*",
-    allow_credentials=False,
+    allow_origins=[
+        "https://telegram.org",
+        "https://web.telegram.org",
+        "https://t.me",
+        "https://*.telegram.org",
+        "https://*.t.me",
+        "*"
+    ],
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
-    expose_headers=["*"],
 )
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
@@ -328,3 +333,4 @@ def buy_product(data: schemas.OrderCreate, db: Session = Depends(get_db)):
         "seller_username": seller_username,
         "seller_link": seller_link
     }
+
