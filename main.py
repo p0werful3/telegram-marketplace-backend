@@ -23,6 +23,12 @@ pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 models.Base.metadata.create_all(bind=engine)
 
+from sqlalchemy import text
+
+with engine.connect() as conn:
+    conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS password_hash VARCHAR"))
+    conn.commit()
+
 
 def hash_password(password: str) -> str:
     return pwd_context.hash(password)
@@ -298,3 +304,4 @@ def buy_product(data: schemas.OrderCreate, db: Session = Depends(get_db)):
         "seller_username": seller_username,
         "seller_link": seller_link
     }
+
