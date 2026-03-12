@@ -23,6 +23,7 @@ class Product(Base):
     description = Column(String, nullable=False)
     price = Column(Float, nullable=False)
     category = Column(String, nullable=False)
+    condition = Column(String, nullable=False, server_default="Новий")
     image_url = Column(String, nullable=True)
     is_active = Column(Boolean, default=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
