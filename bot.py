@@ -9,7 +9,7 @@ bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
 web_app = WebAppInfo(
-    url="https://p0werful3.github.io/telegram-marketplace-miniapp/"
+    url="https://p0werful3.github.io/telegram-marketplace-miniapp/?v=99"
 )
 
 keyboard = ReplyKeyboardMarkup(
