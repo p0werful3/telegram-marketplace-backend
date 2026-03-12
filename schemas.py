@@ -32,11 +32,12 @@ class UserResponse(BaseModel):
 
 class ProductCreate(BaseModel):
     seller_id: int
-    title: str = Field(min_length=1, max_length=150)
-    description: str = Field(min_length=1, max_length=3000)
+    title: str = Field(min_length=2, max_length=150)
+    description: str = Field(min_length=5, max_length=3000)
     price: float
     category: str = Field(min_length=1, max_length=100)
     condition: Literal["Новий", "Б/У"]
+    city: str = Field(min_length=1, max_length=100)
     image_url: Optional[str] = Field(default=None, max_length=1000)
 
 
@@ -47,12 +48,15 @@ class ProductResponse(BaseModel):
     price: float
     category: str
     condition: str
+    city: str
+    status: str
     image_url: Optional[str]
     is_active: bool
     seller_id: int
     seller_username: Optional[str]
     seller_name: Optional[str]
     seller_telegram_link: Optional[str]
+    is_favorite: bool = False
 
     class Config:
         from_attributes = True
@@ -65,4 +69,9 @@ class CartAdd(BaseModel):
 
 class OrderCreate(BaseModel):
     buyer_id: int
+    product_id: int
+
+
+class FavoriteCreate(BaseModel):
+    user_id: int
     product_id: int
