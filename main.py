@@ -35,6 +35,7 @@ def run_safe_migrations() -> None:
         "ALTER TABLE users ADD COLUMN IF NOT EXISTS password_hash VARCHAR",
         "ALTER TABLE products ADD COLUMN IF NOT EXISTS image_url VARCHAR",
         "ALTER TABLE products ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT TRUE",
+        "ALTER TABLE products ADD COLUMN IF NOT EXISTS condition VARCHAR DEFAULT 'Новий'",
         "ALTER TABLE orders ADD COLUMN IF NOT EXISTS seller_username VARCHAR",
         "ALTER TABLE orders ADD COLUMN IF NOT EXISTS seller_link VARCHAR",
     ]
@@ -42,6 +43,16 @@ def run_safe_migrations() -> None:
     with engine.begin() as conn:
         for query in queries:
             conn.execute(text(query))
+
+        conn.execute(
+            text(
+                """
+                UPDATE products
+                SET condition = 'Новий'
+                WHERE condition IS NULL OR condition = ''
+                """
+            )
+        )
 
 
 run_safe_migrations()
@@ -77,6 +88,23 @@ def verify_password(password: str, password_hash: str | None) -> bool:
         return pwd_context.verify(normalized, password_hash)
     except Exception:
         return False
+
+
+def serialize_product(product: models.Product, seller: models.User | None):
+    return {
+        "id": product.id,
+        "title": product.title,
+        "description": product.description,
+        "price": product.price,
+        "category": product.category,
+        "condition": product.condition,
+        "image_url": product.image_url,
+        "is_active": product.is_active,
+        "seller_id": product.seller_id,
+        "seller_username": seller.username if seller else None,
+        "seller_name": seller.full_name if seller else None,
+        "seller_telegram_link": f"https://t.me/{seller.username}" if seller and seller.username else None,
+    }
 
 
 @app.get("/")
@@ -174,6 +202,7 @@ def create_product(product: schemas.ProductCreate, db: Session = Depends(get_db)
     title = product.title.strip()
     description = product.description.strip()
     category = product.category.strip()
+    condition = product.condition.strip()
     image_url = product.image_url.strip() if product.image_url else None
 
     if not title:
@@ -182,6 +211,8 @@ def create_product(product: schemas.ProductCreate, db: Session = Depends(get_db)
         raise HTTPException(status_code=400, detail="Опис товару порожній")
     if not category:
         raise HTTPException(status_code=400, detail="Категорія порожня")
+    if condition not in ("Новий", "Б/У"):
+        raise HTTPException(status_code=400, detail="Некоректний стан товару")
     if product.price <= 0:
         raise HTTPException(status_code=400, detail="Ціна повинна бути більшою за 0")
 
@@ -191,6 +222,7 @@ def create_product(product: schemas.ProductCreate, db: Session = Depends(get_db)
         description=description,
         price=product.price,
         category=category,
+        condition=condition,
         image_url=image_url,
         is_active=True,
     )
@@ -221,19 +253,20 @@ def get_products(
     result = []
     for product in products:
         seller = db.query(models.User).filter(models.User.id == product.seller_id).first()
-        result.append({
-            "id": product.id,
-            "title": product.title,
-            "description": product.description,
-            "price": product.price,
-            "category": product.category,
-            "image_url": product.image_url,
-            "seller_username": seller.username if seller else None,
-            "seller_name": seller.full_name if seller else None,
-            "seller_telegram_link": f"https://t.me/{seller.username}" if seller and seller.username else None
-        })
+        result.append(serialize_product(product, seller))
 
     return result
+
+
+@app.get("/products/{product_id}")
+def get_product(product_id: int, db: Session = Depends(get_db)):
+    product = db.query(models.Product).filter(models.Product.id == product_id).first()
+
+    if not product:
+        raise HTTPException(status_code=404, detail="Товар не знайдено")
+
+    seller = db.query(models.User).filter(models.User.id == product.seller_id).first()
+    return serialize_product(product, seller)
 
 
 @app.get("/users/{user_id}/products")
@@ -245,7 +278,10 @@ def get_my_products(user_id: int, db: Session = Depends(get_db)):
 
     products = (
         db.query(models.Product)
-        .filter(models.Product.seller_id == user.id)
+        .filter(
+            models.Product.seller_id == user.id,
+            models.Product.is_active == True
+        )
         .order_by(models.Product.id.desc())
         .all()
     )
@@ -258,6 +294,40 @@ def get_my_products(user_id: int, db: Session = Depends(get_db)):
             "description": product.description,
             "price": product.price,
             "category": product.category,
+            "condition": product.condition,
+            "image_url": product.image_url,
+            "is_active": product.is_active
+        })
+
+    return result
+
+
+@app.get("/users/{user_id}/products/history")
+def get_my_products_history(user_id: int, db: Session = Depends(get_db)):
+    user = db.query(models.User).filter(models.User.id == user_id).first()
+
+    if not user:
+        raise HTTPException(status_code=404, detail="Користувача не знайдено")
+
+    products = (
+        db.query(models.Product)
+        .filter(
+            models.Product.seller_id == user.id,
+            models.Product.is_active == False
+        )
+        .order_by(models.Product.id.desc())
+        .all()
+    )
+
+    result = []
+    for product in products:
+        result.append({
+            "id": product.id,
+            "title": product.title,
+            "description": product.description,
+            "price": product.price,
+            "category": product.category,
+            "condition": product.condition,
             "image_url": product.image_url,
             "is_active": product.is_active
         })
