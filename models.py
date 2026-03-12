@@ -24,10 +24,20 @@ class Product(Base):
     price = Column(Float, nullable=False)
     category = Column(String, nullable=False)
     condition = Column(String, nullable=False, server_default="Новий")
-    city = Column(String, nullable=False, server_default="Прага")
+    city = Column(String, nullable=False, server_default="Київ")
     status = Column(String, nullable=False, server_default="active")  # active / sold / archived
-    image_url = Column(String, nullable=True)
+    image_url = Column(String, nullable=True)  # first image for backward compatibility
     is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
+class ProductImage(Base):
+    __tablename__ = "product_images"
+
+    id = Column(Integer, primary_key=True, index=True)
+    product_id = Column(Integer, ForeignKey("products.id"), nullable=False, index=True)
+    image_url = Column(String, nullable=False)
+    sort_order = Column(Integer, nullable=False, default=0)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
 
