@@ -8,7 +8,6 @@ from database import engine, get_db
 import models
 import schemas
 
-models.Base.metadata.drop_all(bind=engine)
 models.Base.metadata.create_all(bind=engine)
 
 app = FastAPI(title="Telegram Marketplace API")
@@ -334,6 +333,7 @@ def buy_product(data: schemas.OrderCreate, db: Session = Depends(get_db)):
         "seller_username": seller_username,
         "seller_link": seller_link
     }
+
 
 
 
