@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import Optional, Literal
 from pydantic import BaseModel, Field
 
 
@@ -36,7 +36,26 @@ class ProductCreate(BaseModel):
     description: str = Field(min_length=1, max_length=3000)
     price: float
     category: str = Field(min_length=1, max_length=100)
+    condition: Literal["Новий", "Б/У"]
     image_url: Optional[str] = Field(default=None, max_length=1000)
+
+
+class ProductResponse(BaseModel):
+    id: int
+    title: str
+    description: str
+    price: float
+    category: str
+    condition: str
+    image_url: Optional[str]
+    is_active: bool
+    seller_id: int
+    seller_username: Optional[str]
+    seller_name: Optional[str]
+    seller_telegram_link: Optional[str]
+
+    class Config:
+        from_attributes = True
 
 
 class CartAdd(BaseModel):
