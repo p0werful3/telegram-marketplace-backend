@@ -35,6 +35,7 @@ class ProductCreate(BaseModel):
     title: str = Field(min_length=2, max_length=150)
     description: str = Field(min_length=5, max_length=3000)
     price: float
+    currency: Literal["USD", "UAH", "EUR"]
     category: str = Field(min_length=1, max_length=100)
     condition: Literal["Новий", "Б/У"]
     city: str = Field(min_length=1, max_length=100)
@@ -47,6 +48,7 @@ class ProductResponse(BaseModel):
     title: str
     description: str
     price: float
+    currency: str
     category: str
     condition: str
     city: str
