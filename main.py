@@ -346,6 +346,9 @@ def delete_product(product_id: int, user_id: int = Query(...), db: Session = Dep
         raise HTTPException(status_code=403, detail="Це не ваше оголошення")
 
     product.is_active = False
+
+    db.query(models.CartItem).filter(models.CartItem.product_id == product.id).delete()
+
     db.commit()
 
     return {"message": "Оголошення видалено"}
@@ -361,6 +364,17 @@ def add_to_cart(data: schemas.CartAdd, db: Session = Depends(get_db)):
 
     if not product or not product.is_active:
         raise HTTPException(status_code=404, detail="Товар не знайдено")
+
+    if product.seller_id == user.id:
+        raise HTTPException(status_code=400, detail="Не можна додати в кошик власний товар")
+
+    existing_cart_item = db.query(models.CartItem).filter(
+        models.CartItem.user_id == user.id,
+        models.CartItem.product_id == product.id
+    ).first()
+
+    if existing_cart_item:
+        raise HTTPException(status_code=400, detail="Цей товар уже є в кошику")
 
     cart_item = models.CartItem(user_id=user.id, product_id=product.id)
     db.add(cart_item)
@@ -380,6 +394,7 @@ def get_cart(user_id: int, db: Session = Depends(get_db)):
 
     result = []
     total = 0
+    stale_cart_item_ids = []
 
     for item in cart_items:
         product = db.query(models.Product).filter(
@@ -387,17 +402,24 @@ def get_cart(user_id: int, db: Session = Depends(get_db)):
             models.Product.is_active == True
         ).first()
 
-        if product:
-            seller = db.query(models.User).filter(models.User.id == product.seller_id).first()
-            total += product.price
-            result.append({
-                "cart_item_id": item.id,
-                "product_id": product.id,
-                "title": product.title,
-                "price": product.price,
-                "seller_username": seller.username if seller else None,
-                "seller_link": f"https://t.me/{seller.username}" if seller and seller.username else None
-            })
+        if not product:
+            stale_cart_item_ids.append(item.id)
+            continue
+
+        seller = db.query(models.User).filter(models.User.id == product.seller_id).first()
+        total += product.price
+        result.append({
+            "cart_item_id": item.id,
+            "product_id": product.id,
+            "title": product.title,
+            "price": product.price,
+            "seller_username": seller.username if seller else None,
+            "seller_link": f"https://t.me/{seller.username}" if seller and seller.username else None
+        })
+
+    if stale_cart_item_ids:
+        db.query(models.CartItem).filter(models.CartItem.id.in_(stale_cart_item_ids)).delete(synchronize_session=False)
+        db.commit()
 
     return {"items": result, "total": total}
 
@@ -416,6 +438,9 @@ def buy_product(data: schemas.OrderCreate, db: Session = Depends(get_db)):
     if not product:
         raise HTTPException(status_code=404, detail="Товар не знайдено")
 
+    if product.seller_id == buyer.id:
+        raise HTTPException(status_code=400, detail="Не можна купити власний товар")
+
     seller = db.query(models.User).filter(models.User.id == product.seller_id).first()
 
     seller_username = seller.username if seller else None
@@ -429,6 +454,11 @@ def buy_product(data: schemas.OrderCreate, db: Session = Depends(get_db)):
     )
 
     db.add(order)
+
+    product.is_active = False
+
+    db.query(models.CartItem).filter(models.CartItem.product_id == product.id).delete()
+
     db.commit()
 
     return {
