@@ -1,11 +1,12 @@
 from pydantic import BaseModel
+from typing import Optional
 
 
 class UserCreate(BaseModel):
     username: str
     password: str
-    full_name: str | None = None
-    telegram_id: str | None = None
+    full_name: Optional[str] = None
+    telegram_id: Optional[str] = None
 
 
 class UserLogin(BaseModel):
@@ -15,15 +16,15 @@ class UserLogin(BaseModel):
 
 class TelegramLogin(BaseModel):
     telegram_id: str
-    username: str | None = None
-    full_name: str | None = None
+    username: str
+    full_name: Optional[str] = None
 
 
 class UserResponse(BaseModel):
     id: int
-    telegram_id: str | None = None
+    telegram_id: Optional[str]
     username: str
-    full_name: str | None = None
+    full_name: Optional[str]
 
     class Config:
         from_attributes = True
@@ -35,7 +36,7 @@ class ProductCreate(BaseModel):
     description: str
     price: float
     category: str
-    image_url: str | None = None
+    image_url: Optional[str] = None
 
 
 class CartAdd(BaseModel):
