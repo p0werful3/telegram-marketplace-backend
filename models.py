@@ -22,6 +22,7 @@ class Product(Base):
     title = Column(String, nullable=False)
     description = Column(String, nullable=False)
     price = Column(Float, nullable=False)
+    currency = Column(String, nullable=False, server_default="USD")
     category = Column(String, nullable=False)
     condition = Column(String, nullable=False, server_default="Новий")
     city = Column(String, nullable=False, server_default="Київ")
