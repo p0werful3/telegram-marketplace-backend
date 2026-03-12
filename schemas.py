@@ -1,4 +1,4 @@
-from typing import Optional, Literal
+from typing import Optional, Literal, List
 from pydantic import BaseModel, Field
 
 
@@ -39,6 +39,7 @@ class ProductCreate(BaseModel):
     condition: Literal["Новий", "Б/У"]
     city: str = Field(min_length=1, max_length=100)
     image_url: Optional[str] = Field(default=None, max_length=1000)
+    image_urls: List[str] = Field(default_factory=list, max_length=10)
 
 
 class ProductResponse(BaseModel):
@@ -51,6 +52,7 @@ class ProductResponse(BaseModel):
     city: str
     status: str
     image_url: Optional[str]
+    image_urls: List[str] = []
     is_active: bool
     seller_id: int
     seller_username: Optional[str]
