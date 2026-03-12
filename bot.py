@@ -9,7 +9,7 @@ bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
 web_app = WebAppInfo(
-    url="https://p0werful3.github.io/telegram-marketplace-miniapp/?v=110"
+    url="https://p0werful3.github.io/telegram-marketplace-miniapp/?v=120"
 )
 
 keyboard = ReplyKeyboardMarkup(
@@ -34,3 +34,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
