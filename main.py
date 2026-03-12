@@ -31,9 +31,7 @@ with engine.connect() as conn:
 
 
 def hash_password(password: str) -> str:
-    password = password[:72]
     return pwd_context.hash(password)
-
 
 def verify_password(password: str, password_hash: str) -> bool:
     return pwd_context.verify(password, password_hash)
@@ -305,6 +303,7 @@ def buy_product(data: schemas.OrderCreate, db: Session = Depends(get_db)):
         "seller_username": seller_username,
         "seller_link": seller_link
     }
+
 
 
 
