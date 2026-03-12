@@ -1,3 +1,5 @@
+from hashlib import sha256
+
 from fastapi import FastAPI, Depends, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
@@ -8,8 +10,6 @@ from database import engine, get_db
 import models
 import schemas
 
-models.Base.metadata.create_all(bind=engine)
-
 app = FastAPI(title="Telegram Marketplace API")
 
 app.add_middleware(
@@ -18,15 +18,14 @@ app.add_middleware(
         "https://p0werful3.github.io",
         "https://telegram.org",
         "https://web.telegram.org",
-        "https://t.me"
+        "https://t.me",
     ],
-    allow_credentials=True,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-
 
 models.Base.metadata.create_all(bind=engine)
 
@@ -48,18 +47,46 @@ def run_safe_migrations() -> None:
 run_safe_migrations()
 
 
+def normalize_password(password: str) -> str:
+    if password is None:
+        raise HTTPException(status_code=400, detail="Password обов'язковий")
+
+    if len(password) < 4:
+        raise HTTPException(status_code=400, detail="Password має бути мінімум 4 символи")
+
+    return sha256(password.encode("utf-8")).hexdigest()
+
+
 def hash_password(password: str) -> str:
-    password = password[:72]
-    return pwd_context.hash(password)
+    normalized = normalize_password(password)
+    return pwd_context.hash(normalized)
 
 
-def verify_password(password: str, password_hash: str) -> bool:
-    return pwd_context.verify(password, password_hash)
+def verify_password(password: str, password_hash: str | None) -> bool:
+    if not password_hash:
+        return False
+
+    try:
+        if pwd_context.verify(password, password_hash):
+            return True
+    except Exception:
+        pass
+
+    try:
+        normalized = normalize_password(password)
+        return pwd_context.verify(normalized, password_hash)
+    except Exception:
+        return False
 
 
 @app.get("/")
 def root():
     return {"message": "Telegram Marketplace API працює"}
+
+
+@app.get("/health")
+def health():
+    return {"status": "ok"}
 
 
 @app.post("/auth/register", response_model=schemas.UserResponse)
@@ -70,10 +97,11 @@ def register_user(user: schemas.UserCreate, db: Session = Depends(get_db)):
 
     new_user = models.User(
         telegram_id=user.telegram_id,
-        username=user.username,
-        full_name=user.full_name,
-        password_hash=hash_password(user.password)
+        username=user.username.strip(),
+        full_name=user.full_name.strip() if user.full_name else None,
+        password_hash=hash_password(user.password),
     )
+
     db.add(new_user)
     db.commit()
     db.refresh(new_user)
@@ -101,8 +129,8 @@ def telegram_login(data: schemas.TelegramLogin, db: Session = Depends(get_db)):
     user = db.query(models.User).filter(models.User.telegram_id == data.telegram_id).first()
 
     if user:
-        user.username = data.username
-        user.full_name = data.full_name
+        user.username = data.username.strip()
+        user.full_name = data.full_name.strip() if data.full_name else None
         db.commit()
         db.refresh(user)
         return user
@@ -111,16 +139,16 @@ def telegram_login(data: schemas.TelegramLogin, db: Session = Depends(get_db)):
     if existing_username:
         existing_username.telegram_id = data.telegram_id
         if data.full_name:
-            existing_username.full_name = data.full_name
+            existing_username.full_name = data.full_name.strip()
         db.commit()
         db.refresh(existing_username)
         return existing_username
 
     new_user = models.User(
         telegram_id=data.telegram_id,
-        username=data.username,
-        full_name=data.full_name,
-        password_hash=None
+        username=data.username.strip(),
+        full_name=data.full_name.strip() if data.full_name else None,
+        password_hash=None,
     )
     db.add(new_user)
     db.commit()
@@ -143,22 +171,27 @@ def create_product(product: schemas.ProductCreate, db: Session = Depends(get_db)
     if not seller:
         raise HTTPException(status_code=404, detail="Продавця не знайдено")
 
-    if not product.title.strip():
+    title = product.title.strip()
+    description = product.description.strip()
+    category = product.category.strip()
+    image_url = product.image_url.strip() if product.image_url else None
+
+    if not title:
         raise HTTPException(status_code=400, detail="Назва товару порожня")
-    if not product.description.strip():
+    if not description:
         raise HTTPException(status_code=400, detail="Опис товару порожній")
-    if not product.category.strip():
+    if not category:
         raise HTTPException(status_code=400, detail="Категорія порожня")
     if product.price <= 0:
         raise HTTPException(status_code=400, detail="Ціна повинна бути більшою за 0")
 
     new_product = models.Product(
         seller_id=seller.id,
-        title=product.title.strip(),
-        description=product.description.strip(),
+        title=title,
+        description=description,
         price=product.price,
-        category=product.category.strip(),
-        image_url=(product.image_url.strip() if product.image_url else None),
+        category=category,
+        image_url=image_url,
         is_active=True,
     )
 
@@ -333,8 +366,3 @@ def buy_product(data: schemas.OrderCreate, db: Session = Depends(get_db)):
         "seller_username": seller_username,
         "seller_link": seller_link
     }
-
-
-
-
-
