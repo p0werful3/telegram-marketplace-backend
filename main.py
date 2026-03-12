@@ -36,7 +36,7 @@ def run_safe_migrations() -> None:
         "ALTER TABLE products ADD COLUMN IF NOT EXISTS image_url VARCHAR",
         "ALTER TABLE products ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT TRUE",
         "ALTER TABLE products ADD COLUMN IF NOT EXISTS condition VARCHAR DEFAULT 'Новий'",
-        "ALTER TABLE products ADD COLUMN IF NOT EXISTS city VARCHAR DEFAULT 'Прага'",
+        "ALTER TABLE products ADD COLUMN IF NOT EXISTS city VARCHAR DEFAULT 'Київ'",
         "ALTER TABLE products ADD COLUMN IF NOT EXISTS status VARCHAR DEFAULT 'active'",
         "ALTER TABLE orders ADD COLUMN IF NOT EXISTS seller_username VARCHAR",
         "ALTER TABLE orders ADD COLUMN IF NOT EXISTS seller_link VARCHAR",
@@ -60,7 +60,7 @@ def run_safe_migrations() -> None:
             text(
                 """
                 UPDATE products
-                SET city = 'Прага'
+                SET city = 'Київ'
                 WHERE city IS NULL OR city = ''
                 """
             )
@@ -127,12 +127,22 @@ def verify_password(password: str, password_hash: str | None) -> bool:
         return False
 
 
-def normalize_text(value: str) -> str:
+def normalize_text(value: str | None) -> str:
     return " ".join((value or "").strip().split())
 
 
 def sync_product_activity(product: models.Product) -> None:
     product.is_active = product.status == "active"
+
+
+def get_product_images(db: Session, product_id: int) -> list[str]:
+    images = (
+        db.query(models.ProductImage)
+        .filter(models.ProductImage.product_id == product_id)
+        .order_by(models.ProductImage.sort_order.asc(), models.ProductImage.id.asc())
+        .all()
+    )
+    return [img.image_url for img in images]
 
 
 def is_favorite_product(db: Session, user_id: int | None, product_id: int) -> bool:
@@ -153,6 +163,12 @@ def serialize_product(
     seller: models.User | None,
     current_user_id: int | None = None
 ):
+    image_urls = get_product_images(db, product.id)
+    fallback_first = product.image_url if product.image_url else (image_urls[0] if image_urls else None)
+
+    if not image_urls and fallback_first:
+        image_urls = [fallback_first]
+
     return {
         "id": product.id,
         "title": product.title,
@@ -162,7 +178,8 @@ def serialize_product(
         "condition": product.condition,
         "city": product.city,
         "status": product.status,
-        "image_url": product.image_url,
+        "image_url": fallback_first,
+        "image_urls": image_urls,
         "is_active": product.is_active,
         "seller_id": product.seller_id,
         "seller_username": seller.username if seller else None,
@@ -270,42 +287,18 @@ def get_user_stats(user_id: int, db: Session = Depends(get_db)):
     if not user:
         raise HTTPException(status_code=404, detail="Користувача не знайдено")
 
-    active_count = db.query(models.Product).filter(
-        models.Product.seller_id == user_id,
-        models.Product.status == "active"
-    ).count()
-
-    sold_count = db.query(models.Product).filter(
-        models.Product.seller_id == user_id,
-        models.Product.status == "sold"
-    ).count()
-
-    archived_count = db.query(models.Product).filter(
-        models.Product.seller_id == user_id,
-        models.Product.status == "archived"
-    ).count()
-
-    favorites_count = db.query(models.Favorite).filter(
-        models.Favorite.user_id == user_id
-    ).count()
-
-    cart_count = db.query(models.CartItem).filter(
-        models.CartItem.user_id == user_id
-    ).count()
-
     return {
-        "active_products": active_count,
-        "sold_products": sold_count,
-        "archived_products": archived_count,
-        "favorites": favorites_count,
-        "cart_items": cart_count,
+        "active_products": db.query(models.Product).filter(models.Product.seller_id == user_id, models.Product.status == "active").count(),
+        "sold_products": db.query(models.Product).filter(models.Product.seller_id == user_id, models.Product.status == "sold").count(),
+        "archived_products": db.query(models.Product).filter(models.Product.seller_id == user_id, models.Product.status == "archived").count(),
+        "favorites": db.query(models.Favorite).filter(models.Favorite.user_id == user_id).count(),
+        "cart_items": db.query(models.CartItem).filter(models.CartItem.user_id == user_id).count(),
     }
 
 
 @app.post("/products")
 def create_product(product: schemas.ProductCreate, db: Session = Depends(get_db)):
     seller = db.query(models.User).filter(models.User.id == product.seller_id).first()
-
     if not seller:
         raise HTTPException(status_code=404, detail="Продавця не знайдено")
 
@@ -314,7 +307,13 @@ def create_product(product: schemas.ProductCreate, db: Session = Depends(get_db)
     category = normalize_text(product.category)
     condition = normalize_text(product.condition)
     city = normalize_text(product.city)
-    image_url = normalize_text(product.image_url) if product.image_url else None
+
+    image_urls = [normalize_text(url) for url in (product.image_urls or []) if normalize_text(url)]
+    if product.image_url and normalize_text(product.image_url) not in image_urls:
+        image_urls.insert(0, normalize_text(product.image_url))
+
+    if len(image_urls) > 10:
+        raise HTTPException(status_code=400, detail="Можна додати максимум 10 фото")
 
     if not title:
         raise HTTPException(status_code=400, detail="Назва товару порожня")
@@ -335,6 +334,8 @@ def create_product(product: schemas.ProductCreate, db: Session = Depends(get_db)
     if product.price > 100000000:
         raise HTTPException(status_code=400, detail="Ціна занадто велика")
 
+    first_image = image_urls[0] if image_urls else None
+
     new_product = models.Product(
         seller_id=seller.id,
         title=title,
@@ -344,13 +345,18 @@ def create_product(product: schemas.ProductCreate, db: Session = Depends(get_db)
         condition=condition,
         city=city,
         status="active",
-        image_url=image_url,
+        image_url=first_image,
         is_active=True,
     )
 
     db.add(new_product)
     db.commit()
     db.refresh(new_product)
+
+    for idx, url in enumerate(image_urls):
+        db.add(models.ProductImage(product_id=new_product.id, image_url=url, sort_order=idx))
+
+    db.commit()
 
     return {"message": "Товар створено", "product_id": new_product.id}
 
@@ -361,6 +367,8 @@ def get_products(
     category: str | None = Query(default=None),
     city: str | None = Query(default=None),
     condition: str | None = Query(default=None),
+    price_min: float | None = Query(default=None),
+    price_max: float | None = Query(default=None),
     sort: str | None = Query(default="newest"),
     current_user_id: int | None = Query(default=None),
     db: Session = Depends(get_db)
@@ -384,6 +392,12 @@ def get_products(
 
     if condition and condition != "Усі":
         query = query.filter(models.Product.condition == condition)
+
+    if price_min is not None:
+        query = query.filter(models.Product.price >= price_min)
+
+    if price_max is not None:
+        query = query.filter(models.Product.price <= price_max)
 
     if sort == "price_asc":
         query = query.order_by(models.Product.price.asc(), models.Product.id.desc())
@@ -409,7 +423,6 @@ def get_product(
     db: Session = Depends(get_db)
 ):
     product = db.query(models.Product).filter(models.Product.id == product_id).first()
-
     if not product:
         raise HTTPException(status_code=404, detail="Товар не знайдено")
 
@@ -417,150 +430,70 @@ def get_product(
     return serialize_product(db, product, seller, current_user_id)
 
 
+def _serialize_simple_my_product(product: models.Product, db: Session):
+    return {
+        "id": product.id,
+        "title": product.title,
+        "description": product.description,
+        "price": product.price,
+        "category": product.category,
+        "condition": product.condition,
+        "city": product.city,
+        "status": product.status,
+        "image_url": product.image_url,
+        "image_urls": get_product_images(db, product.id) or ([product.image_url] if product.image_url else []),
+        "is_active": product.is_active
+    }
+
+
 @app.get("/users/{user_id}/products")
 def get_my_products(user_id: int, db: Session = Depends(get_db)):
     user = db.query(models.User).filter(models.User.id == user_id).first()
-
     if not user:
         raise HTTPException(status_code=404, detail="Користувача не знайдено")
 
     products = (
         db.query(models.Product)
-        .filter(
-            models.Product.seller_id == user.id,
-            models.Product.status == "active"
-        )
+        .filter(models.Product.seller_id == user.id, models.Product.status == "active")
         .order_by(models.Product.id.desc())
         .all()
     )
-
-    result = []
-    for product in products:
-        result.append({
-            "id": product.id,
-            "title": product.title,
-            "description": product.description,
-            "price": product.price,
-            "category": product.category,
-            "condition": product.condition,
-            "city": product.city,
-            "status": product.status,
-            "image_url": product.image_url,
-            "is_active": product.is_active
-        })
-
-    return result
+    return [_serialize_simple_my_product(product, db) for product in products]
 
 
 @app.get("/users/{user_id}/products/sold")
 def get_my_sold_products(user_id: int, db: Session = Depends(get_db)):
     user = db.query(models.User).filter(models.User.id == user_id).first()
-
     if not user:
         raise HTTPException(status_code=404, detail="Користувача не знайдено")
 
     products = (
         db.query(models.Product)
-        .filter(
-            models.Product.seller_id == user.id,
-            models.Product.status == "sold"
-        )
+        .filter(models.Product.seller_id == user.id, models.Product.status == "sold")
         .order_by(models.Product.id.desc())
         .all()
     )
-
-    result = []
-    for product in products:
-        result.append({
-            "id": product.id,
-            "title": product.title,
-            "description": product.description,
-            "price": product.price,
-            "category": product.category,
-            "condition": product.condition,
-            "city": product.city,
-            "status": product.status,
-            "image_url": product.image_url,
-            "is_active": product.is_active
-        })
-
-    return result
+    return [_serialize_simple_my_product(product, db) for product in products]
 
 
 @app.get("/users/{user_id}/products/archived")
 def get_my_archived_products(user_id: int, db: Session = Depends(get_db)):
     user = db.query(models.User).filter(models.User.id == user_id).first()
-
     if not user:
         raise HTTPException(status_code=404, detail="Користувача не знайдено")
 
     products = (
         db.query(models.Product)
-        .filter(
-            models.Product.seller_id == user.id,
-            models.Product.status == "archived"
-        )
+        .filter(models.Product.seller_id == user.id, models.Product.status == "archived")
         .order_by(models.Product.id.desc())
         .all()
     )
-
-    result = []
-    for product in products:
-        result.append({
-            "id": product.id,
-            "title": product.title,
-            "description": product.description,
-            "price": product.price,
-            "category": product.category,
-            "condition": product.condition,
-            "city": product.city,
-            "status": product.status,
-            "image_url": product.image_url,
-            "is_active": product.is_active
-        })
-
-    return result
-
-
-@app.get("/users/{user_id}/products/history")
-def get_my_products_history(user_id: int, db: Session = Depends(get_db)):
-    user = db.query(models.User).filter(models.User.id == user_id).first()
-
-    if not user:
-        raise HTTPException(status_code=404, detail="Користувача не знайдено")
-
-    products = (
-        db.query(models.Product)
-        .filter(
-            models.Product.seller_id == user.id,
-            models.Product.status.in_(["sold", "archived"])
-        )
-        .order_by(models.Product.id.desc())
-        .all()
-    )
-
-    result = []
-    for product in products:
-        result.append({
-            "id": product.id,
-            "title": product.title,
-            "description": product.description,
-            "price": product.price,
-            "category": product.category,
-            "condition": product.condition,
-            "city": product.city,
-            "status": product.status,
-            "image_url": product.image_url,
-            "is_active": product.is_active
-        })
-
-    return result
+    return [_serialize_simple_my_product(product, db) for product in products]
 
 
 @app.delete("/products/{product_id}")
 def delete_product(product_id: int, user_id: int = Query(...), db: Session = Depends(get_db)):
     product = db.query(models.Product).filter(models.Product.id == product_id).first()
-
     if not product:
         raise HTTPException(status_code=404, detail="Товар не знайдено")
 
@@ -574,7 +507,6 @@ def delete_product(product_id: int, user_id: int = Query(...), db: Session = Dep
     db.query(models.Favorite).filter(models.Favorite.product_id == product.id).delete()
 
     db.commit()
-
     return {"message": "Оголошення перенесено в архів"}
 
 
@@ -585,10 +517,8 @@ def add_to_cart(data: schemas.CartAdd, db: Session = Depends(get_db)):
 
     if not user:
         raise HTTPException(status_code=404, detail="Користувача не знайдено")
-
     if not product or product.status != "active":
         raise HTTPException(status_code=404, detail="Товар не знайдено")
-
     if product.seller_id == user.id:
         raise HTTPException(status_code=400, detail="Не можна додати в кошик власний товар")
 
@@ -600,8 +530,7 @@ def add_to_cart(data: schemas.CartAdd, db: Session = Depends(get_db)):
     if existing_cart_item:
         raise HTTPException(status_code=400, detail="Цей товар уже є в кошику")
 
-    cart_item = models.CartItem(user_id=user.id, product_id=product.id)
-    db.add(cart_item)
+    db.add(models.CartItem(user_id=user.id, product_id=product.id))
     db.commit()
 
     return {"message": "Товар додано до кошика"}
@@ -610,7 +539,6 @@ def add_to_cart(data: schemas.CartAdd, db: Session = Depends(get_db)):
 @app.get("/cart/{user_id}")
 def get_cart(user_id: int, db: Session = Depends(get_db)):
     user = db.query(models.User).filter(models.User.id == user_id).first()
-
     if not user:
         raise HTTPException(status_code=404, detail="Користувача не знайдено")
 
@@ -652,7 +580,6 @@ def remove_cart_item(cart_item_id: int, user_id: int = Query(...), db: Session =
 
     if not cart_item:
         raise HTTPException(status_code=404, detail="Елемент кошика не знайдено")
-
     if cart_item.user_id != user_id:
         raise HTTPException(status_code=403, detail="Це не ваш кошик")
 
@@ -669,10 +596,8 @@ def buy_product(data: schemas.OrderCreate, db: Session = Depends(get_db)):
 
     if not buyer:
         raise HTTPException(status_code=404, detail="Покупця не знайдено")
-
     if not product or product.status != "active":
         raise HTTPException(status_code=404, detail="Товар не знайдено")
-
     if product.seller_id == buyer.id:
         raise HTTPException(status_code=400, detail="Не можна купити власний товар")
 
@@ -681,14 +606,12 @@ def buy_product(data: schemas.OrderCreate, db: Session = Depends(get_db)):
     seller_username = seller.username if seller else None
     seller_link = f"https://t.me/{seller_username}" if seller_username else None
 
-    order = models.Order(
+    db.add(models.Order(
         buyer_id=buyer.id,
         product_id=product.id,
         seller_username=seller_username,
         seller_link=seller_link
-    )
-
-    db.add(order)
+    ))
 
     product.status = "sold"
     sync_product_activity(product)
@@ -712,7 +635,6 @@ def add_to_favorites(data: schemas.FavoriteCreate, db: Session = Depends(get_db)
 
     if not user:
         raise HTTPException(status_code=404, detail="Користувача не знайдено")
-
     if not product or product.status != "active":
         raise HTTPException(status_code=404, detail="Товар не знайдено")
 
@@ -724,8 +646,7 @@ def add_to_favorites(data: schemas.FavoriteCreate, db: Session = Depends(get_db)
     if existing:
         raise HTTPException(status_code=400, detail="Товар уже в обраному")
 
-    favorite = models.Favorite(user_id=user.id, product_id=product.id)
-    db.add(favorite)
+    db.add(models.Favorite(user_id=user.id, product_id=product.id))
     db.commit()
 
     return {"message": "Товар додано в обране"}
@@ -750,13 +671,10 @@ def remove_from_favorites(user_id: int = Query(...), product_id: int = Query(...
 @app.get("/favorites/{user_id}")
 def get_favorites(user_id: int, db: Session = Depends(get_db)):
     user = db.query(models.User).filter(models.User.id == user_id).first()
-
     if not user:
         raise HTTPException(status_code=404, detail="Користувача не знайдено")
 
-    favorites = db.query(models.Favorite).filter(
-        models.Favorite.user_id == user_id
-    ).order_by(models.Favorite.id.desc()).all()
+    favorites = db.query(models.Favorite).filter(models.Favorite.user_id == user_id).order_by(models.Favorite.id.desc()).all()
 
     result = []
     stale_favorite_ids = []
