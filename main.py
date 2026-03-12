@@ -13,12 +13,10 @@ app = FastAPI(title="Telegram Marketplace API")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
+        "https://p0werful3.github.io",
         "https://telegram.org",
         "https://web.telegram.org",
         "https://t.me",
-        "https://*.telegram.org",
-        "https://*.t.me",
-        "*"
     ],
     allow_credentials=True,
     allow_methods=["*"],
@@ -333,4 +331,5 @@ def buy_product(data: schemas.OrderCreate, db: Session = Depends(get_db)):
         "seller_username": seller_username,
         "seller_link": seller_link
     }
+
 
