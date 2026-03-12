@@ -36,6 +36,7 @@ def run_safe_migrations() -> None:
         "ALTER TABLE products ADD COLUMN IF NOT EXISTS image_url VARCHAR",
         "ALTER TABLE products ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT TRUE",
         "ALTER TABLE products ADD COLUMN IF NOT EXISTS condition VARCHAR DEFAULT 'Новий'",
+        "ALTER TABLE products ADD COLUMN IF NOT EXISTS currency VARCHAR DEFAULT 'USD'",
         "ALTER TABLE products ADD COLUMN IF NOT EXISTS city VARCHAR DEFAULT 'Київ'",
         "ALTER TABLE products ADD COLUMN IF NOT EXISTS status VARCHAR DEFAULT 'active'",
         "ALTER TABLE orders ADD COLUMN IF NOT EXISTS seller_username VARCHAR",
@@ -62,6 +63,16 @@ def run_safe_migrations() -> None:
                 UPDATE products
                 SET city = 'Київ'
                 WHERE city IS NULL OR city = ''
+                """
+            )
+        )
+
+        conn.execute(
+            text(
+                """
+                UPDATE products
+                SET currency = 'USD'
+                WHERE currency IS NULL OR currency = ''
                 """
             )
         )
@@ -174,6 +185,7 @@ def serialize_product(
         "title": product.title,
         "description": product.description,
         "price": product.price,
+        "currency": product.currency or "USD",
         "category": product.category,
         "condition": product.condition,
         "city": product.city,
@@ -307,6 +319,7 @@ def create_product(product: schemas.ProductCreate, db: Session = Depends(get_db)
     category = normalize_text(product.category)
     condition = normalize_text(product.condition)
     city = normalize_text(product.city)
+    currency = normalize_text(product.currency).upper()
 
     image_urls = [normalize_text(url) for url in (product.image_urls or []) if normalize_text(url)]
     if product.image_url and normalize_text(product.image_url) not in image_urls:
@@ -329,6 +342,8 @@ def create_product(product: schemas.ProductCreate, db: Session = Depends(get_db)
         raise HTTPException(status_code=400, detail="Некоректний стан товару")
     if not city:
         raise HTTPException(status_code=400, detail="Місто порожнє")
+    if currency not in ("USD", "UAH", "EUR"):
+        raise HTTPException(status_code=400, detail="Некоректна валюта")
     if product.price <= 0:
         raise HTTPException(status_code=400, detail="Ціна повинна бути більшою за 0")
     if product.price > 100000000:
@@ -341,6 +356,7 @@ def create_product(product: schemas.ProductCreate, db: Session = Depends(get_db)
         title=title,
         description=description,
         price=product.price,
+        currency=currency,
         category=category,
         condition=condition,
         city=city,
@@ -436,6 +452,7 @@ def _serialize_simple_my_product(product: models.Product, db: Session):
         "title": product.title,
         "description": product.description,
         "price": product.price,
+        "currency": product.currency or "USD",
         "category": product.category,
         "condition": product.condition,
         "city": product.city,
@@ -545,7 +562,7 @@ def get_cart(user_id: int, db: Session = Depends(get_db)):
     cart_items = db.query(models.CartItem).filter(models.CartItem.user_id == user.id).order_by(models.CartItem.id.desc()).all()
 
     result = []
-    total = 0
+    total_by_currency = {"USD": 0, "UAH": 0, "EUR": 0}
     stale_cart_item_ids = []
 
     for item in cart_items:
@@ -556,12 +573,16 @@ def get_cart(user_id: int, db: Session = Depends(get_db)):
             continue
 
         seller = db.query(models.User).filter(models.User.id == product.seller_id).first()
-        total += product.price
+        currency = product.currency or "USD"
+        if currency not in total_by_currency:
+            total_by_currency[currency] = 0
+        total_by_currency[currency] += product.price
         result.append({
             "cart_item_id": item.id,
             "product_id": product.id,
             "title": product.title,
             "price": product.price,
+            "currency": currency,
             "image_url": product.image_url,
             "seller_username": seller.username if seller else None,
             "seller_link": f"https://t.me/{seller.username}" if seller and seller.username else None
@@ -571,7 +592,7 @@ def get_cart(user_id: int, db: Session = Depends(get_db)):
         db.query(models.CartItem).filter(models.CartItem.id.in_(stale_cart_item_ids)).delete(synchronize_session=False)
         db.commit()
 
-    return {"items": result, "total": total}
+    return {"items": result, "total_by_currency": total_by_currency}
 
 
 @app.delete("/cart/items/{cart_item_id}")
