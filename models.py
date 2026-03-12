@@ -24,6 +24,8 @@ class Product(Base):
     price = Column(Float, nullable=False)
     category = Column(String, nullable=False)
     condition = Column(String, nullable=False, server_default="Новий")
+    city = Column(String, nullable=False, server_default="Прага")
+    status = Column(String, nullable=False, server_default="active")  # active / sold / archived
     image_url = Column(String, nullable=True)
     is_active = Column(Boolean, default=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
@@ -46,4 +48,13 @@ class Order(Base):
     product_id = Column(Integer, ForeignKey("products.id"), nullable=False)
     seller_username = Column(String, nullable=True)
     seller_link = Column(String, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
+class Favorite(Base):
+    __tablename__ = "favorites"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    product_id = Column(Integer, ForeignKey("products.id"), nullable=False, index=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
