@@ -2,6 +2,7 @@ from fastapi import FastAPI, Depends, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from passlib.context import CryptContext
+from sqlalchemy import text
 
 from database import engine, get_db
 import models
@@ -19,19 +20,33 @@ app.add_middleware(
     expose_headers=["*"],
 )
 
-pwd_context = CryptContext(schemes=["pbkdf2_sha256"], deprecated="auto")
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
 
 models.Base.metadata.create_all(bind=engine)
 
-from sqlalchemy import text
 
-with engine.connect() as conn:
-    conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS password_hash VARCHAR"))
-    conn.commit()
+def run_safe_migrations() -> None:
+    queries = [
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS password_hash VARCHAR",
+        "ALTER TABLE products ADD COLUMN IF NOT EXISTS image_url VARCHAR",
+        "ALTER TABLE products ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT TRUE",
+        "ALTER TABLE orders ADD COLUMN IF NOT EXISTS seller_username VARCHAR",
+        "ALTER TABLE orders ADD COLUMN IF NOT EXISTS seller_link VARCHAR",
+    ]
+
+    with engine.begin() as conn:
+        for query in queries:
+            conn.execute(text(query))
+
+
+run_safe_migrations()
 
 
 def hash_password(password: str) -> str:
+    password = password[:72]
     return pwd_context.hash(password)
+
 
 def verify_password(password: str, password_hash: str) -> bool:
     return pwd_context.verify(password, password_hash)
@@ -123,13 +138,23 @@ def create_product(product: schemas.ProductCreate, db: Session = Depends(get_db)
     if not seller:
         raise HTTPException(status_code=404, detail="Продавця не знайдено")
 
+    if not product.title.strip():
+        raise HTTPException(status_code=400, detail="Назва товару порожня")
+    if not product.description.strip():
+        raise HTTPException(status_code=400, detail="Опис товару порожній")
+    if not product.category.strip():
+        raise HTTPException(status_code=400, detail="Категорія порожня")
+    if product.price <= 0:
+        raise HTTPException(status_code=400, detail="Ціна повинна бути більшою за 0")
+
     new_product = models.Product(
         seller_id=seller.id,
-        title=product.title,
-        description=product.description,
+        title=product.title.strip(),
+        description=product.description.strip(),
         price=product.price,
-        category=product.category,
-        image_url=product.image_url
+        category=product.category.strip(),
+        image_url=(product.image_url.strip() if product.image_url else None),
+        is_active=True,
     )
 
     db.add(new_product)
@@ -303,7 +328,3 @@ def buy_product(data: schemas.OrderCreate, db: Session = Depends(get_db)):
         "seller_username": seller_username,
         "seller_link": seller_link
     }
-
-
-
-
