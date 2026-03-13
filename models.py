@@ -107,3 +107,15 @@ class AdminLog(Base):
     target_id = Column(Integer, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
+
+
+class Suggestion(Base):
+    __tablename__ = "suggestions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    username = Column(String, nullable=True)
+    title = Column(String, nullable=False)
+    message = Column(String, nullable=False)
+    status = Column(String, nullable=False, server_default="new")
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
