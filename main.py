@@ -658,26 +658,35 @@ def decide_order(order_id: int, data: schemas.OrderDecision, db: Session = Depen
         raise HTTPException(status_code=403, detail="Це не ваш запит")
     if order.status != "pending":
         raise HTTPException(status_code=400, detail="Запит уже оброблено")
-    product = db.query(models.Product).filter(models.Product.id == order.product_id).first()
-    if not product:
-    order.status = "rejected"
-    order.seller_response_at = datetime.utcnow()
-    db.commit()
-    return {"message": "Товар уже недоступний, запит прибрано"}
 
-if product.status != "active":
-    order.status = "rejected"
-    order.seller_response_at = datetime.utcnow()
-    db.commit()
-    return {"message": "Товар уже недоступний, запит прибрано"}
+    product = db.query(models.Product).filter(models.Product.id == order.product_id).first()
+
+    if not product:
+        order.status = "rejected"
+        order.seller_response_at = datetime.utcnow()
+        db.commit()
+        return {"message": "Товар уже недоступний, запит прибрано"}
+
+    if product.status != "active":
+        order.status = "rejected"
+        order.seller_response_at = datetime.utcnow()
+        db.commit()
+        return {"message": "Товар уже недоступний, запит прибрано"}
+
     order.status = "approved" if data.approve else "rejected"
     order.seller_response_at = datetime.utcnow()
+
     if data.approve:
         product.status = "sold"
         sync_product_activity(product)
         db.query(models.CartItem).filter(models.CartItem.product_id == product.id).delete()
         db.query(models.Favorite).filter(models.Favorite.product_id == product.id).delete()
-        db.query(models.Order).filter(models.Order.product_id == product.id, models.Order.id != order.id, models.Order.status == "pending").update({models.Order.status: "rejected"}, synchronize_session=False)
+        db.query(models.Order).filter(
+            models.Order.product_id == product.id,
+            models.Order.id != order.id,
+            models.Order.status == "pending"
+        ).update({models.Order.status: "rejected"}, synchronize_session=False)
+
     db.commit()
     return {"message": "Запит підтверджено" if data.approve else "Запит відхилено"}
 
