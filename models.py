@@ -12,10 +12,12 @@ class User(Base):
     full_name = Column(String, nullable=True)
     avatar_url = Column(String, nullable=True)
     password_hash = Column(String, nullable=True)
+
     is_admin = Column(Boolean, nullable=False, default=False, server_default="false")
     is_banned = Column(Boolean, nullable=False, default=False, server_default="false")
     rating_sum = Column(Float, nullable=False, default=0, server_default="0")
     rating_count = Column(Integer, nullable=False, default=0, server_default="0")
+
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
 
@@ -104,3 +106,4 @@ class AdminLog(Base):
     target_type = Column(String, nullable=True)
     target_id = Column(Integer, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+
