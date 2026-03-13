@@ -34,12 +34,19 @@ ALLOWED_CURRENCIES = {"USD", "UAH", "EUR"}
 def run_safe_migrations() -> None:
     queries = [
         "ALTER TABLE users ADD COLUMN IF NOT EXISTS password_hash VARCHAR",
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_url VARCHAR",
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS is_admin BOOLEAN DEFAULT FALSE",
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS is_banned BOOLEAN DEFAULT FALSE",
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS rating_sum FLOAT DEFAULT 0",
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS rating_count INTEGER DEFAULT 0",
+
         "ALTER TABLE products ADD COLUMN IF NOT EXISTS image_url VARCHAR",
         "ALTER TABLE products ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT TRUE",
         "ALTER TABLE products ADD COLUMN IF NOT EXISTS condition VARCHAR DEFAULT 'Новий'",
         "ALTER TABLE products ADD COLUMN IF NOT EXISTS city VARCHAR DEFAULT 'Київ'",
         "ALTER TABLE products ADD COLUMN IF NOT EXISTS status VARCHAR DEFAULT 'active'",
         "ALTER TABLE products ADD COLUMN IF NOT EXISTS currency VARCHAR DEFAULT 'USD'",
+
         "ALTER TABLE orders ADD COLUMN IF NOT EXISTS seller_username VARCHAR",
         "ALTER TABLE orders ADD COLUMN IF NOT EXISTS seller_link VARCHAR",
         "ALTER TABLE orders ADD COLUMN IF NOT EXISTS seller_id INTEGER",
@@ -48,6 +55,7 @@ def run_safe_migrations() -> None:
         "ALTER TABLE orders ADD COLUMN IF NOT EXISTS buyer_username VARCHAR",
         "ALTER TABLE orders ADD COLUMN IF NOT EXISTS buyer_full_name VARCHAR",
         "ALTER TABLE orders ADD COLUMN IF NOT EXISTS status VARCHAR DEFAULT 'pending'",
+        "ALTER TABLE orders ADD COLUMN IF NOT EXISTS created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()",
         "ALTER TABLE orders ADD COLUMN IF NOT EXISTS seller_response_at TIMESTAMP WITH TIME ZONE",
     ]
 
@@ -59,12 +67,43 @@ def run_safe_migrations() -> None:
         conn.execute(text("UPDATE users SET is_banned=FALSE WHERE is_banned IS NULL"))
         conn.execute(text("UPDATE users SET rating_sum=0 WHERE rating_sum IS NULL"))
         conn.execute(text("UPDATE users SET rating_count=0 WHERE rating_count IS NULL"))
-        conn.execute(text("CREATE TABLE IF NOT EXISTS reviews (id SERIAL PRIMARY KEY, order_id INTEGER UNIQUE NOT NULL REFERENCES orders(id), seller_id INTEGER NOT NULL REFERENCES users(id), buyer_id INTEGER NOT NULL REFERENCES users(id), rating INTEGER NOT NULL, comment VARCHAR, created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW())"))
-        conn.execute(text("CREATE TABLE IF NOT EXISTS admin_logs (id SERIAL PRIMARY KEY, admin_id INTEGER NOT NULL REFERENCES users(id), action VARCHAR NOT NULL, target_type VARCHAR, target_id INTEGER, created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW())"))
+
+        conn.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS reviews (
+                    id SERIAL PRIMARY KEY,
+                    order_id INTEGER UNIQUE NOT NULL REFERENCES orders(id),
+                    seller_id INTEGER NOT NULL REFERENCES users(id),
+                    buyer_id INTEGER NOT NULL REFERENCES users(id),
+                    rating INTEGER NOT NULL,
+                    comment VARCHAR,
+                    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+                )
+                """
+            )
+        )
+
+        conn.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS admin_logs (
+                    id SERIAL PRIMARY KEY,
+                    admin_id INTEGER NOT NULL REFERENCES users(id),
+                    action VARCHAR NOT NULL,
+                    target_type VARCHAR,
+                    target_id INTEGER,
+                    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+                )
+                """
+            )
+        )
+
         conn.execute(text("UPDATE products SET condition='Новий' WHERE condition IS NULL OR condition=''"))
         conn.execute(text("UPDATE products SET city='Київ' WHERE city IS NULL OR city=''"))
         conn.execute(text("UPDATE products SET currency='USD' WHERE currency IS NULL OR currency=''"))
         conn.execute(text("UPDATE orders SET currency='USD' WHERE currency IS NULL OR currency=''"))
+
         conn.execute(
             text(
                 """
@@ -77,6 +116,7 @@ def run_safe_migrations() -> None:
                 """
             )
         )
+
         conn.execute(
             text(
                 """
@@ -85,6 +125,7 @@ def run_safe_migrations() -> None:
                 """
             )
         )
+
         conn.execute(
             text(
                 """
@@ -962,4 +1003,5 @@ def get_favorites(user_id: int, db: Session = Depends(get_db)):
         db.query(models.Favorite).filter(models.Favorite.id.in_(stale_ids)).delete(synchronize_session=False)
         db.commit()
     return result
+
 
