@@ -1,33 +1,23 @@
-from typing import Optional, Literal, List
-from pydantic import BaseModel, Field
-
-
-CurrencyType = Literal["USD", "UAH", "EUR"]
-ConditionType = Literal["Новий", "Б/У"]
+from typing import Optional, List
+from pydantic import BaseModel, Field, validator
 
 
 class UserCreate(BaseModel):
-    username: str = Field(min_length=3, max_length=50)
-    password: str = Field(min_length=4, max_length=128)
-    full_name: Optional[str] = Field(default=None, max_length=100)
-    telegram_id: Optional[str] = Field(default=None, max_length=50)
+    username: str
+    full_name: str
+    password: str
+    telegram_id: Optional[str] = None
 
 
 class UserLogin(BaseModel):
-    username: str = Field(min_length=3, max_length=50)
-    password: str = Field(min_length=4, max_length=128)
+    username: str
+    password: str
 
 
 class TelegramLogin(BaseModel):
-    telegram_id: str = Field(min_length=1, max_length=50)
-    username: str = Field(min_length=3, max_length=50)
-    full_name: Optional[str] = Field(default=None, max_length=100)
-
-
-class UserProfileUpdate(BaseModel):
-    username: str = Field(min_length=3, max_length=50)
-    full_name: Optional[str] = Field(default=None, max_length=100)
-    password: Optional[str] = Field(default=None, min_length=4, max_length=128)
+    telegram_id: str
+    username: str
+    full_name: Optional[str] = None
 
 
 class UserResponse(BaseModel):
@@ -35,49 +25,42 @@ class UserResponse(BaseModel):
     telegram_id: Optional[str] = None
     username: str
     full_name: Optional[str] = None
+    avatar_url: Optional[str] = None
+    is_admin: bool = False
+    is_banned: bool = False
+    rating_sum: float = 0
+    rating_count: int = 0
 
     class Config:
-        from_attributes = True
+        orm_mode = True
 
 
-class ProductCreate(BaseModel):
+class UserProfileUpdate(BaseModel):
+    username: str
+    full_name: Optional[str] = None
+    avatar_url: Optional[str] = None
+    password: Optional[str] = None
+
+
+class ProductBase(BaseModel):
     seller_id: int
-    title: str = Field(min_length=2, max_length=150)
-    description: str = Field(min_length=5, max_length=3000)
-    price: float
-    currency: CurrencyType = "USD"
-    category: str = Field(min_length=1, max_length=100)
-    condition: ConditionType
-    city: str = Field(min_length=1, max_length=100)
-    image_url: Optional[str] = Field(default=None, max_length=1000)
-    image_urls: List[str] = Field(default_factory=list)
-
-
-class ProductUpdate(ProductCreate):
-    pass
-
-
-class ProductResponse(BaseModel):
-    id: int
     title: str
     description: str
     price: float
-    currency: CurrencyType = "USD"
+    currency: str = "USD"
     category: str
-    condition: str
-    city: str
-    status: str
+    condition: str = "Новий"
+    city: str = "Київ"
     image_url: Optional[str] = None
-    image_urls: List[str] = []
-    is_active: bool
-    seller_id: int
-    seller_username: Optional[str] = None
-    seller_name: Optional[str] = None
-    seller_telegram_link: Optional[str] = None
-    is_favorite: bool = False
+    image_urls: List[str] = Field(default_factory=list)
 
-    class Config:
-        from_attributes = True
+
+class ProductCreate(ProductBase):
+    pass
+
+
+class ProductUpdate(ProductBase):
+    pass
 
 
 class CartAdd(BaseModel):
@@ -95,6 +78,10 @@ class OrderDecision(BaseModel):
     approve: bool
 
 
+class OrderCancel(BaseModel):
+    buyer_id: int
+
+
 class FavoriteCreate(BaseModel):
     user_id: int
     product_id: int
@@ -102,5 +89,11 @@ class FavoriteCreate(BaseModel):
 
 class ReviewCreate(BaseModel):
     buyer_id: int
-    rating: int = Field(ge=1, le=5)
-    comment: Optional[str] = Field(default=None, max_length=500)
+    rating: int
+    comment: Optional[str] = None
+
+    @validator("rating")
+    def validate_rating(cls, value: int) -> int:
+        if value < 1 or value > 5:
+            raise ValueError("Rating має бути від 1 до 5")
+        return value
