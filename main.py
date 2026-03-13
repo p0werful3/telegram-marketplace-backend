@@ -660,9 +660,16 @@ def decide_order(order_id: int, data: schemas.OrderDecision, db: Session = Depen
         raise HTTPException(status_code=400, detail="Запит уже оброблено")
     product = db.query(models.Product).filter(models.Product.id == order.product_id).first()
     if not product:
-        raise HTTPException(status_code=404, detail="Товар не знайдено")
-    if product.status != "active":
-        raise HTTPException(status_code=400, detail="Товар уже недоступний")
+    order.status = "rejected"
+    order.seller_response_at = datetime.utcnow()
+    db.commit()
+    return {"message": "Товар уже недоступний, запит прибрано"}
+
+if product.status != "active":
+    order.status = "rejected"
+    order.seller_response_at = datetime.utcnow()
+    db.commit()
+    return {"message": "Товар уже недоступний, запит прибрано"}
     order.status = "approved" if data.approve else "rejected"
     order.seller_response_at = datetime.utcnow()
     if data.approve:
@@ -720,3 +727,4 @@ def get_favorites(user_id: int, db: Session = Depends(get_db)):
         db.query(models.Favorite).filter(models.Favorite.id.in_(stale_ids)).delete(synchronize_session=False)
         db.commit()
     return result
+
