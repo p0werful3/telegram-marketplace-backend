@@ -18,7 +18,7 @@ class Product(Base):
     __tablename__ = "products"
 
     id = Column(Integer, primary_key=True, index=True)
-    seller_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    seller_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
     title = Column(String, nullable=False)
     description = Column(String, nullable=False)
     price = Column(Float, nullable=False)
@@ -28,7 +28,7 @@ class Product(Base):
     city = Column(String, nullable=False, server_default="Київ")
     status = Column(String, nullable=False, server_default="active")  # active / sold / archived
     image_url = Column(String, nullable=True)  # first image for backward compatibility
-    is_active = Column(Boolean, default=True)
+    is_active = Column(Boolean, nullable=False, default=True, server_default="true")
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
 
@@ -38,7 +38,7 @@ class ProductImage(Base):
     id = Column(Integer, primary_key=True, index=True)
     product_id = Column(Integer, ForeignKey("products.id"), nullable=False, index=True)
     image_url = Column(String, nullable=False)
-    sort_order = Column(Integer, nullable=False, default=0)
+    sort_order = Column(Integer, nullable=False, default=0, server_default="0")
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
 
@@ -46,8 +46,8 @@ class CartItem(Base):
     __tablename__ = "cart_items"
 
     id = Column(Integer, primary_key=True, index=True)
-    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
-    product_id = Column(Integer, ForeignKey("products.id"), nullable=False)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    product_id = Column(Integer, ForeignKey("products.id"), nullable=False, index=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
 
@@ -55,10 +55,17 @@ class Order(Base):
     __tablename__ = "orders"
 
     id = Column(Integer, primary_key=True, index=True)
-    buyer_id = Column(Integer, ForeignKey("users.id"), nullable=False)
-    product_id = Column(Integer, ForeignKey("products.id"), nullable=False)
+    buyer_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    seller_id = Column(Integer, ForeignKey("users.id"), nullable=True, index=True)
+    product_id = Column(Integer, ForeignKey("products.id"), nullable=False, index=True)
+    offered_price = Column(Float, nullable=True)
+    currency = Column(String, nullable=False, server_default="USD")
+    buyer_username = Column(String, nullable=True)
+    buyer_full_name = Column(String, nullable=True)
     seller_username = Column(String, nullable=True)
     seller_link = Column(String, nullable=True)
+    status = Column(String, nullable=False, server_default="pending")  # pending / approved / rejected
+    seller_response_at = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
 
