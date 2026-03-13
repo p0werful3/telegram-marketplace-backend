@@ -1,3 +1,4 @@
+
 from typing import Optional, List
 from pydantic import BaseModel, Field, validator
 
@@ -106,4 +107,15 @@ class SuggestionCreate(BaseModel):
 
 
 class SuggestionStatusUpdate(BaseModel):
+    status: str
+
+
+class ReportCreate(BaseModel):
+    reporter_id: int
+    listing_id: int
+    reason: str
+    comment: Optional[str] = None
+
+
+class ReportStatusUpdate(BaseModel):
     status: str
