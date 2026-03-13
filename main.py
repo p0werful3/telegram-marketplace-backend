@@ -395,6 +395,39 @@ def telegram_login(data: schemas.TelegramLogin, db: Session = Depends(get_db)):
 
 
 @app.get("/users/{user_id}", response_model=schemas.UserResponse)
+@app.get("/users/{user_id}/public-profile")
+def get_public_profile(user_id: int, db: Session = Depends(get_db)):
+
+    user = db.query(models.User).filter(models.User.id == user_id).first()
+
+    if not user:
+        raise HTTPException(status_code=404, detail="Користувача не знайдено")
+
+    active_products = db.query(models.Product).filter(
+        models.Product.seller_id == user.id,
+        models.Product.status == "active"
+    ).count()
+
+    sold_products = db.query(models.Product).filter(
+        models.Product.seller_id == user.id,
+        models.Product.status == "sold"
+    ).count()
+
+    archived_products = db.query(models.Product).filter(
+        models.Product.seller_id == user.id,
+        models.Product.status == "archived"
+    ).count()
+
+    return {
+        "id": user.id,
+        "username": user.username,
+        "full_name": user.full_name,
+        "is_admin": user.is_admin,
+        "active_products": active_products,
+        "sold_products": sold_products,
+        "archived_products": archived_products,
+        "telegram_link": f"https://t.me/{user.username}" if user.username else None
+    }
 def get_user(user_id: int, db: Session = Depends(get_db)):
     user = db.query(models.User).filter(models.User.id == user_id).first()
     if not user:
