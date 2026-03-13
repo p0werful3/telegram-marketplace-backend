@@ -108,7 +108,6 @@ class AdminLog(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
 
-
 class Suggestion(Base):
     __tablename__ = "suggestions"
 
