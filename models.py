@@ -10,6 +10,7 @@ class User(Base):
     telegram_id = Column(String, unique=True, nullable=True, index=True)
     username = Column(String, unique=True, nullable=False, index=True)
     full_name = Column(String, nullable=True)
+    avatar_url = Column(String, nullable=True)
     password_hash = Column(String, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
@@ -64,7 +65,7 @@ class Order(Base):
     buyer_full_name = Column(String, nullable=True)
     seller_username = Column(String, nullable=True)
     seller_link = Column(String, nullable=True)
-    status = Column(String, nullable=False, server_default="pending")  # pending / approved / rejected
+    status = Column(String, nullable=False, server_default="pending")  # pending / approved / rejected / canceled
     seller_response_at = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
