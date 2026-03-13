@@ -105,10 +105,25 @@ def run_safe_migrations() -> None:
                 CREATE TABLE IF NOT EXISTS suggestions (
                     id SERIAL PRIMARY KEY,
                     user_id INTEGER NOT NULL REFERENCES users(id),
-                    username VARCHAR,
                     title VARCHAR NOT NULL,
                     message VARCHAR NOT NULL,
-                    status VARCHAR DEFAULT 'new',
+                    status VARCHAR NOT NULL DEFAULT 'new',
+                    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+                )
+                """
+            )
+        )
+
+        conn.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS reports (
+                    id SERIAL PRIMARY KEY,
+                    reporter_id INTEGER NOT NULL REFERENCES users(id),
+                    listing_id INTEGER NOT NULL REFERENCES products(id),
+                    reason VARCHAR NOT NULL,
+                    comment VARCHAR,
+                    status VARCHAR NOT NULL DEFAULT 'new',
                     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
                 )
                 """
@@ -285,11 +300,10 @@ def serialize_product(db: Session, product: models.Product, seller: models.User 
         "seller_id": product.seller_id,
         "seller_username": seller.username if seller else None,
         "seller_name": seller.full_name if seller else None,
-        "seller_rating": rating_value(seller),
-        "seller_rating_count": seller.rating_count if seller else 0,
         "seller_telegram_link": f"https://t.me/{seller.username}" if seller and seller.username else None,
-        "is_favorite": is_favorite_product(db, current_user_id, product.id),
+        "seller_rating": rating_value(seller) if seller else 0,
         "created_at": product.created_at.isoformat() if product.created_at else None,
+        "is_favorite": is_favorite_product(db, current_user_id, product.id),
     }
 
 
@@ -455,8 +469,6 @@ def get_public_profile(user_id: int, db: Session = Depends(get_db)):
         models.Product.status == "archived"
     ).count()
 
-    reviews_count = db.query(models.Review).filter(models.Review.seller_id == user.id).count()
-
     return {
         "id": user.id,
         "username": user.username,
@@ -465,7 +477,6 @@ def get_public_profile(user_id: int, db: Session = Depends(get_db)):
         "is_admin": user.is_admin,
         "rating": rating_value(user),
         "rating_count": user.rating_count or 0,
-        "reviews_count": reviews_count,
         "active_products": active_products,
         "sold_products": sold_products,
         "archived_products": archived_products,
@@ -478,7 +489,6 @@ def get_user_reviews(user_id: int, db: Session = Depends(get_db)):
     user = db.query(models.User).filter(models.User.id == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="Користувача не знайдено")
-
     reviews = db.query(models.Review).filter(models.Review.seller_id == user_id).order_by(models.Review.id.desc()).all()
     result = []
     for review in reviews:
@@ -499,12 +509,10 @@ def update_user_profile(user_id: int, data: schemas.UserProfileUpdate, db: Sessi
     user = db.query(models.User).filter(models.User.id == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="Користувача не знайдено")
-    ensure_not_banned(user)
     user.username = ensure_unique_username(db, data.username, exclude_user_id=user.id)
     user.full_name = normalize_text(data.full_name) if data.full_name else None
     if data.avatar_url is not None:
-        cleaned_avatar = normalize_text(data.avatar_url)
-        user.avatar_url = cleaned_avatar or None
+        user.avatar_url = normalize_text(data.avatar_url) or None
     if data.password:
         user.password_hash = hash_password(data.password)
     db.commit()
@@ -629,9 +637,7 @@ def get_products(
         query = query.order_by(models.Product.id.desc())
 
     products = query.all()
-    if sort == "rating_desc":
-        products.sort(key=lambda product: rating_value(db.query(models.User).filter(models.User.id == product.seller_id).first()), reverse=True)
-    return [
+    result = [
         serialize_product(
             db,
             product,
@@ -640,6 +646,9 @@ def get_products(
         )
         for product in products
     ]
+    if sort == "seller_rating":
+        result.sort(key=lambda item: (item.get("seller_rating") or 0, item.get("id") or 0), reverse=True)
+    return result
 
 
 @app.get("/products/{product_id}")
@@ -753,6 +762,20 @@ def get_purchase_history(user_id: int, db: Session = Depends(get_db)):
     return result
 
 
+@app.delete("/orders/{order_id}/cancel")
+def cancel_order(order_id: int, buyer_id: int = Query(...), db: Session = Depends(get_db)):
+    order = db.query(models.Order).filter(models.Order.id == order_id).first()
+    if not order:
+        raise HTTPException(status_code=404, detail="Запит не знайдено")
+    if order.buyer_id != buyer_id:
+        raise HTTPException(status_code=403, detail="Це не ваш запит")
+    if order.status != "pending":
+        raise HTTPException(status_code=400, detail="Скасувати можна тільки запит, який очікує підтвердження")
+    db.delete(order)
+    db.commit()
+    return {"message": "Запит скасовано"}
+
+
 @app.delete("/products/{product_id}")
 def delete_product(product_id: int, user_id: int = Query(...), db: Session = Depends(get_db)):
     product = db.query(models.Product).filter(models.Product.id == product_id).first()
@@ -768,10 +791,7 @@ def delete_product(product_id: int, user_id: int = Query(...), db: Session = Dep
     db.query(models.Order).filter(
         models.Order.product_id == product.id,
         models.Order.status == "pending"
-    ).update({
-        models.Order.status: "rejected",
-        models.Order.seller_response_at: datetime.utcnow()
-    }, synchronize_session=False)
+    ).update({models.Order.status: "rejected"}, synchronize_session=False)
     db.commit()
     return {"message": "Оголошення перенесено в архів"}
 
@@ -938,28 +958,6 @@ def decide_order(order_id: int, data: schemas.OrderDecision, db: Session = Depen
     return {"message": "Запит підтверджено" if data.approve else "Запит відхилено"}
 
 
-@app.post("/orders/{order_id}/cancel")
-def cancel_order(order_id: int, data: schemas.OrderCancel, db: Session = Depends(get_db)):
-    order = db.query(models.Order).filter(models.Order.id == order_id).first()
-    if not order:
-        raise HTTPException(status_code=404, detail="Запит не знайдено")
-    if order.buyer_id != data.buyer_id:
-        raise HTTPException(status_code=403, detail="Це не ваш запит")
-    if order.status != "pending":
-        raise HTTPException(status_code=400, detail="Скасувати можна тільки запит, що очікує підтвердження")
-
-    order.status = "cancelled"
-    order.seller_response_at = datetime.utcnow()
-
-    db.query(models.CartItem).filter(
-        models.CartItem.user_id == order.buyer_id,
-        models.CartItem.product_id == order.product_id
-    ).delete(synchronize_session=False)
-
-    db.commit()
-    return {"message": "Запит на покупку скасовано", "order_id": order.id, "status": order.status}
-
-
 @app.post("/orders/{order_id}/review")
 def create_review(order_id: int, data: schemas.ReviewCreate, db: Session = Depends(get_db)):
     order = db.query(models.Order).filter(models.Order.id == order_id).first()
@@ -994,57 +992,6 @@ def create_review(order_id: int, data: schemas.ReviewCreate, db: Session = Depen
     return {"message": "Дякуємо за оцінку", "rating": data.rating}
 
 
-@app.post("/suggestions")
-def create_suggestion(data: schemas.SuggestionCreate, db: Session = Depends(get_db)):
-    user = db.query(models.User).filter(models.User.id == data.user_id).first()
-    if not user:
-        raise HTTPException(status_code=404, detail="Користувача не знайдено")
-    ensure_not_banned(user)
-
-    title = normalize_text(data.title)
-    message = normalize_text(data.message)
-    if len(title) < 3:
-        raise HTTPException(status_code=400, detail="Назва ідеї має бути мінімум 3 символи")
-    if len(message) < 5:
-        raise HTTPException(status_code=400, detail="Опишіть ідею детальніше")
-
-    suggestion = models.Suggestion(user_id=user.id, username=user.username, title=title, message=message, status="new")
-    db.add(suggestion)
-    db.commit()
-    db.refresh(suggestion)
-    return {"message": "Ідею надіслано", "suggestion_id": suggestion.id}
-
-
-@app.get("/admin/suggestions")
-def admin_list_suggestions(current_admin_id: int = Query(...), db: Session = Depends(get_db)):
-    require_admin(db, current_admin_id)
-    items = db.query(models.Suggestion).order_by(models.Suggestion.id.desc()).all()
-    return [{
-        "id": item.id,
-        "user_id": item.user_id,
-        "username": item.username,
-        "title": item.title,
-        "message": item.message,
-        "status": item.status,
-        "created_at": item.created_at.isoformat() if item.created_at else None,
-    } for item in items]
-
-
-@app.post("/admin/suggestions/{suggestion_id}/status")
-def admin_update_suggestion_status(suggestion_id: int, data: schemas.SuggestionStatusUpdate, current_admin_id: int = Query(...), db: Session = Depends(get_db)):
-    require_admin(db, current_admin_id)
-    suggestion = db.query(models.Suggestion).filter(models.Suggestion.id == suggestion_id).first()
-    if not suggestion:
-        raise HTTPException(status_code=404, detail="Ідею не знайдено")
-    new_status = normalize_text(data.status).lower()
-    if new_status not in {"new", "reviewed", "done"}:
-        raise HTTPException(status_code=400, detail="Некоректний статус")
-    suggestion.status = new_status
-    db.commit()
-    log_admin_action(db, current_admin_id, f"suggestion {new_status} #{suggestion.id}", "suggestion", suggestion.id)
-    return {"message": "Статус оновлено", "status": suggestion.status}
-
-
 @app.get("/admin/summary")
 def get_admin_summary(current_admin_id: int = Query(...), db: Session = Depends(get_db)):
     require_admin(db, current_admin_id)
@@ -1055,8 +1002,8 @@ def get_admin_summary(current_admin_id: int = Query(...), db: Session = Depends(
         "active_products": db.query(models.Product).filter(models.Product.status == "active").count(),
         "orders_pending": db.query(models.Order).filter(models.Order.status == "pending").count(),
         "admins": db.query(models.User).filter(models.User.is_admin == True).count(),
-        "suggestions": db.query(models.Suggestion).count(),
-        "new_suggestions": db.query(models.Suggestion).filter(models.Suggestion.status == "new").count(),
+        "suggestions_new": db.query(models.Suggestion).filter(models.Suggestion.status == "new").count(),
+        "reports_new": db.query(models.Report).filter(models.Report.status == "new").count(),
     }
 
 
@@ -1174,13 +1121,11 @@ def admin_archive_product(product_id: int, current_admin_id: int = Query(...), d
     db.query(models.Order).filter(
         models.Order.product_id == product.id,
         models.Order.status == "pending"
-    ).update({
-        models.Order.status: "rejected",
-        models.Order.seller_response_at: datetime.utcnow()
-    }, synchronize_session=False)
+    ).update({models.Order.status: "rejected"}, synchronize_session=False)
     db.commit()
     log_admin_action(db, current_admin_id, f"archive product #{product.id}", "product", product.id)
     return {"message": "Оголошення перенесено в архів"}
+
 
 
 @app.post("/admin/products/{product_id}/restore")
@@ -1190,7 +1135,7 @@ def admin_restore_product(product_id: int, current_admin_id: int = Query(...), d
     if not product:
         raise HTTPException(status_code=404, detail="Товар не знайдено")
     if product.status == "sold":
-        raise HTTPException(status_code=400, detail="Продане оголошення не можна відновити")
+        raise HTTPException(status_code=400, detail="Проданий товар не можна повернути в активні")
     product.status = "active"
     sync_product_activity(product)
     db.commit()
@@ -1231,6 +1176,120 @@ def admin_logs(current_admin_id: int = Query(...), db: Session = Depends(get_db)
             "admin_username": admin.username if admin else None,
         })
     return result
+
+
+
+@app.post("/suggestions")
+def create_suggestion(data: schemas.SuggestionCreate, db: Session = Depends(get_db)):
+    user = db.query(models.User).filter(models.User.id == data.user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="Користувача не знайдено")
+    ensure_not_banned(user)
+    title = normalize_text(data.title)
+    message = normalize_text(data.message)
+    if len(title) < 3:
+        raise HTTPException(status_code=400, detail="Вкажіть назву ідеї")
+    if len(message) < 5:
+        raise HTTPException(status_code=400, detail="Опишіть ідею детальніше")
+    item = models.Suggestion(user_id=user.id, title=title, message=message, status="new")
+    db.add(item)
+    db.commit()
+    return {"message": "Ідею надіслано"}
+
+
+@app.post("/reports")
+def create_report(data: schemas.ReportCreate, db: Session = Depends(get_db)):
+    user = db.query(models.User).filter(models.User.id == data.reporter_id).first()
+    product = db.query(models.Product).filter(models.Product.id == data.listing_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="Користувача не знайдено")
+    ensure_not_banned(user)
+    if not product:
+        raise HTTPException(status_code=404, detail="Оголошення не знайдено")
+    reason = normalize_text(data.reason)
+    allowed = {"Шахрайство", "Неправдивий опис", "Заборонений товар", "Спам", "Інше"}
+    if reason not in allowed:
+        raise HTTPException(status_code=400, detail="Некоректна причина")
+    comment = normalize_text(data.comment) or None
+    if reason == "Інше" and not comment:
+        raise HTTPException(status_code=400, detail="Опишіть причину скарги")
+    item = models.Report(reporter_id=user.id, listing_id=product.id, reason=reason, comment=comment, status="new")
+    db.add(item)
+    db.commit()
+    return {"message": "Скаргу надіслано"}
+
+
+@app.get("/admin/suggestions")
+def admin_list_suggestions(current_admin_id: int = Query(...), db: Session = Depends(get_db)):
+    require_admin(db, current_admin_id)
+    items = db.query(models.Suggestion).order_by(models.Suggestion.id.desc()).all()
+    result = []
+    for item in items:
+        user = db.query(models.User).filter(models.User.id == item.user_id).first()
+        result.append({
+            "id": item.id,
+            "title": item.title,
+            "message": item.message,
+            "status": item.status,
+            "created_at": item.created_at.isoformat() if item.created_at else None,
+            "user_id": item.user_id,
+            "username": user.username if user else None,
+        })
+    return result
+
+
+@app.post("/admin/suggestions/{suggestion_id}/status")
+def admin_update_suggestion_status(suggestion_id: int, data: schemas.SuggestionStatusUpdate, current_admin_id: int = Query(...), db: Session = Depends(get_db)):
+    require_admin(db, current_admin_id)
+    item = db.query(models.Suggestion).filter(models.Suggestion.id == suggestion_id).first()
+    if not item:
+        raise HTTPException(status_code=404, detail="Ідею не знайдено")
+    status = normalize_text(data.status).lower()
+    mapping = {"new": "new", "review": "review", "done": "done"}
+    if status not in mapping:
+        raise HTTPException(status_code=400, detail="Некоректний статус")
+    item.status = mapping[status]
+    db.commit()
+    log_admin_action(db, current_admin_id, f"suggestion-status {status} #{item.id}", "suggestion", item.id)
+    return {"message": "Статус ідеї оновлено"}
+
+
+@app.get("/admin/reports")
+def admin_list_reports(current_admin_id: int = Query(...), db: Session = Depends(get_db)):
+    require_admin(db, current_admin_id)
+    items = db.query(models.Report).order_by(models.Report.id.desc()).all()
+    result = []
+    for item in items:
+        user = db.query(models.User).filter(models.User.id == item.reporter_id).first()
+        product = db.query(models.Product).filter(models.Product.id == item.listing_id).first()
+        result.append({
+            "id": item.id,
+            "listing_id": item.listing_id,
+            "listing_title": product.title if product else f"Оголошення #{item.listing_id}",
+            "status": item.status,
+            "reason": item.reason,
+            "comment": item.comment,
+            "created_at": item.created_at.isoformat() if item.created_at else None,
+            "reporter_id": item.reporter_id,
+            "reporter_username": user.username if user else None,
+        })
+    return result
+
+
+@app.post("/admin/reports/{report_id}/status")
+def admin_update_report_status(report_id: int, data: schemas.ReportStatusUpdate, current_admin_id: int = Query(...), db: Session = Depends(get_db)):
+    require_admin(db, current_admin_id)
+    item = db.query(models.Report).filter(models.Report.id == report_id).first()
+    if not item:
+        raise HTTPException(status_code=404, detail="Скаргу не знайдено")
+    status = normalize_text(data.status).lower()
+    mapping = {"new": "new", "review": "review", "done": "done"}
+    if status not in mapping:
+        raise HTTPException(status_code=400, detail="Некоректний статус")
+    item.status = mapping[status]
+    db.commit()
+    log_admin_action(db, current_admin_id, f"report-status {status} #{item.id}", "report", item.id)
+    return {"message": "Статус скарги оновлено"}
 
 
 @app.post("/favorites")
