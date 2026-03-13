@@ -347,7 +347,12 @@ def health():
 def register_user(user: schemas.UserCreate, db: Session = Depends(get_db)):
     username = ensure_unique_username(db, user.username)
     full_name = normalize_text(user.full_name) if user.full_name else None
-    new_user = models.User(telegram_id=user.telegram_id, username=username, full_name=full_name, password_hash=hash_password(user.password))
+    new_user = models.User(
+        telegram_id=user.telegram_id,
+        username=username,
+        full_name=full_name,
+        password_hash=hash_password(user.password),
+    )
     db.add(new_user)
     db.commit()
     db.refresh(new_user)
@@ -370,6 +375,7 @@ def telegram_login(data: schemas.TelegramLogin, db: Session = Depends(get_db)):
     full_name = normalize_text(data.full_name) if data.full_name else None
     if not username:
         raise HTTPException(status_code=400, detail="У Telegram акаунта немає username")
+
     user = db.query(models.User).filter(models.User.telegram_id == data.telegram_id).first()
     if user:
         ensure_not_banned(user)
@@ -378,6 +384,7 @@ def telegram_login(data: schemas.TelegramLogin, db: Session = Depends(get_db)):
         db.commit()
         db.refresh(user)
         return user
+
     existing_username = db.query(models.User).filter(models.User.username == username).first()
     if existing_username:
         ensure_not_banned(existing_username)
@@ -387,7 +394,13 @@ def telegram_login(data: schemas.TelegramLogin, db: Session = Depends(get_db)):
         db.commit()
         db.refresh(existing_username)
         return existing_username
-    new_user = models.User(telegram_id=data.telegram_id, username=username, full_name=full_name, password_hash=None)
+
+    new_user = models.User(
+        telegram_id=data.telegram_id,
+        username=username,
+        full_name=full_name,
+        password_hash=None,
+    )
     db.add(new_user)
     db.commit()
     db.refresh(new_user)
@@ -395,11 +408,16 @@ def telegram_login(data: schemas.TelegramLogin, db: Session = Depends(get_db)):
 
 
 @app.get("/users/{user_id}", response_model=schemas.UserResponse)
+def get_user(user_id: int, db: Session = Depends(get_db)):
+    user = db.query(models.User).filter(models.User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="Користувача не знайдено")
+    return user
+
+
 @app.get("/users/{user_id}/public-profile")
 def get_public_profile(user_id: int, db: Session = Depends(get_db)):
-
     user = db.query(models.User).filter(models.User.id == user_id).first()
-
     if not user:
         raise HTTPException(status_code=404, detail="Користувача не знайдено")
 
@@ -422,17 +440,15 @@ def get_public_profile(user_id: int, db: Session = Depends(get_db)):
         "id": user.id,
         "username": user.username,
         "full_name": user.full_name,
+        "avatar_url": user.avatar_url,
         "is_admin": user.is_admin,
+        "rating": rating_value(user),
+        "rating_count": user.rating_count or 0,
         "active_products": active_products,
         "sold_products": sold_products,
         "archived_products": archived_products,
-        "telegram_link": f"https://t.me/{user.username}" if user.username else None
+        "telegram_link": f"https://t.me/{user.username}" if user.username else None,
     }
-def get_user(user_id: int, db: Session = Depends(get_db)):
-    user = db.query(models.User).filter(models.User.id == user_id).first()
-    if not user:
-        raise HTTPException(status_code=404, detail="Користувача не знайдено")
-    return user
 
 
 @app.put("/users/{user_id}/profile", response_model=schemas.UserResponse)
@@ -472,6 +488,7 @@ def create_product(product: schemas.ProductCreate, db: Session = Depends(get_db)
     if not seller:
         raise HTTPException(status_code=404, detail="Продавця не знайдено")
     ensure_not_banned(seller)
+
     payload = validate_and_prepare_product_payload(product)
     new_product = models.Product(
         seller_id=seller.id,
@@ -501,10 +518,13 @@ def update_product(product_id: int, product: schemas.ProductUpdate, db: Session 
         raise HTTPException(status_code=404, detail="Товар не знайдено")
     if existing.seller_id != product.seller_id:
         raise HTTPException(status_code=403, detail="Це не ваше оголошення")
+
     owner = db.query(models.User).filter(models.User.id == product.seller_id).first()
     ensure_not_banned(owner)
+
     if existing.status != "active":
         raise HTTPException(status_code=400, detail="Редагувати можна тільки активне оголошення")
+
     payload = validate_and_prepare_product_payload(product)
     existing.title = payload["title"]
     existing.description = payload["description"]
@@ -532,9 +552,15 @@ def get_products(
     db: Session = Depends(get_db),
 ):
     query = db.query(models.Product).filter(models.Product.status == "active")
+
     if q:
         q_clean = normalize_text(q)
-        query = query.filter(or_(models.Product.title.ilike(f"%{q_clean}%"), models.Product.description.ilike(f"%{q_clean}%")))
+        query = query.filter(
+            or_(
+                models.Product.title.ilike(f"%{q_clean}%"),
+                models.Product.description.ilike(f"%{q_clean}%")
+            )
+        )
     if category and category != "Усі":
         query = query.filter(models.Product.category == category)
     if city and city != "Усі":
@@ -545,14 +571,24 @@ def get_products(
         query = query.filter(models.Product.price >= price_min)
     if price_max is not None:
         query = query.filter(models.Product.price <= price_max)
+
     if sort == "price_asc":
         query = query.order_by(models.Product.price.asc(), models.Product.id.desc())
     elif sort == "price_desc":
         query = query.order_by(models.Product.price.desc(), models.Product.id.desc())
     else:
         query = query.order_by(models.Product.id.desc())
+
     products = query.all()
-    return [serialize_product(db, product, db.query(models.User).filter(models.User.id == product.seller_id).first(), current_user_id) for product in products]
+    return [
+        serialize_product(
+            db,
+            product,
+            db.query(models.User).filter(models.User.id == product.seller_id).first(),
+            current_user_id,
+        )
+        for product in products
+    ]
 
 
 @app.get("/products/{product_id}")
@@ -569,7 +605,10 @@ def get_my_products(user_id: int, db: Session = Depends(get_db)):
     user = db.query(models.User).filter(models.User.id == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="Користувача не знайдено")
-    products = db.query(models.Product).filter(models.Product.seller_id == user.id, models.Product.status == "active").order_by(models.Product.id.desc()).all()
+    products = db.query(models.Product).filter(
+        models.Product.seller_id == user.id,
+        models.Product.status == "active"
+    ).order_by(models.Product.id.desc()).all()
     return [_serialize_simple_my_product(product, db) for product in products]
 
 
@@ -578,7 +617,10 @@ def get_my_sold_products(user_id: int, db: Session = Depends(get_db)):
     user = db.query(models.User).filter(models.User.id == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="Користувача не знайдено")
-    products = db.query(models.Product).filter(models.Product.seller_id == user.id, models.Product.status == "sold").order_by(models.Product.id.desc()).all()
+    products = db.query(models.Product).filter(
+        models.Product.seller_id == user.id,
+        models.Product.status == "sold"
+    ).order_by(models.Product.id.desc()).all()
     return [_serialize_simple_my_product(product, db) for product in products]
 
 
@@ -587,7 +629,10 @@ def get_my_archived_products(user_id: int, db: Session = Depends(get_db)):
     user = db.query(models.User).filter(models.User.id == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="Користувача не знайдено")
-    products = db.query(models.Product).filter(models.Product.seller_id == user.id, models.Product.status == "archived").order_by(models.Product.id.desc()).all()
+    products = db.query(models.Product).filter(
+        models.Product.seller_id == user.id,
+        models.Product.status == "archived"
+    ).order_by(models.Product.id.desc()).all()
     return [_serialize_simple_my_product(product, db) for product in products]
 
 
@@ -596,16 +641,18 @@ def get_purchase_requests(user_id: int, status: str = Query(default="pending"), 
     user = db.query(models.User).filter(models.User.id == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="Користувача не знайдено")
+
     query = db.query(models.Order).filter(models.Order.seller_id == user_id)
     if status != "all":
         query = query.filter(models.Order.status == status)
+
     orders = query.order_by(models.Order.id.desc()).all()
     result = []
     for order in orders:
         product = db.query(models.Product).filter(models.Product.id == order.product_id).first()
         if not product:
             continue
-        review = db.query(models.Review).filter(models.Review.order_id == order.id).first()
+
         result.append({
             "order_id": order.id,
             "status": order.status,
@@ -627,12 +674,14 @@ def get_purchase_history(user_id: int, db: Session = Depends(get_db)):
     user = db.query(models.User).filter(models.User.id == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="Користувача не знайдено")
+
     orders = db.query(models.Order).filter(models.Order.buyer_id == user_id).order_by(models.Order.id.desc()).all()
     result = []
     for order in orders:
         product = db.query(models.Product).filter(models.Product.id == order.product_id).first()
         seller = db.query(models.User).filter(models.User.id == order.seller_id).first() if order.seller_id else None
         review = db.query(models.Review).filter(models.Review.order_id == order.id).first()
+
         result.append({
             "order_id": order.id,
             "status": order.status,
@@ -660,11 +709,15 @@ def delete_product(product_id: int, user_id: int = Query(...), db: Session = Dep
         raise HTTPException(status_code=404, detail="Товар не знайдено")
     if product.seller_id != user_id:
         raise HTTPException(status_code=403, detail="Це не ваше оголошення")
+
     product.status = "archived"
     sync_product_activity(product)
     db.query(models.CartItem).filter(models.CartItem.product_id == product.id).delete()
     db.query(models.Favorite).filter(models.Favorite.product_id == product.id).delete()
-    db.query(models.Order).filter(models.Order.product_id == product.id, models.Order.status == "pending").update({models.Order.status: "rejected"}, synchronize_session=False)
+    db.query(models.Order).filter(
+        models.Order.product_id == product.id,
+        models.Order.status == "pending"
+    ).update({models.Order.status: "rejected"}, synchronize_session=False)
     db.commit()
     return {"message": "Оголошення перенесено в архів"}
 
@@ -680,9 +733,14 @@ def add_to_cart(data: schemas.CartAdd, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Товар не знайдено")
     if product.seller_id == user.id:
         raise HTTPException(status_code=400, detail="Не можна додати в кошик власний товар")
-    existing_cart_item = db.query(models.CartItem).filter(models.CartItem.user_id == user.id, models.CartItem.product_id == product.id).first()
+
+    existing_cart_item = db.query(models.CartItem).filter(
+        models.CartItem.user_id == user.id,
+        models.CartItem.product_id == product.id
+    ).first()
     if existing_cart_item:
         raise HTTPException(status_code=400, detail="Цей товар уже є в кошику")
+
     db.add(models.CartItem(user_id=user.id, product_id=product.id))
     db.commit()
     return {"message": "Товар додано до кошика"}
@@ -693,15 +751,18 @@ def get_cart(user_id: int, db: Session = Depends(get_db)):
     user = db.query(models.User).filter(models.User.id == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="Користувача не знайдено")
+
     cart_items = db.query(models.CartItem).filter(models.CartItem.user_id == user.id).order_by(models.CartItem.id.desc()).all()
     result = []
     totals_by_currency = {"USD": 0, "UAH": 0, "EUR": 0}
     stale_ids = []
+
     for item in cart_items:
         product = db.query(models.Product).filter(models.Product.id == item.product_id).first()
         if not product or product.status != "active":
             stale_ids.append(item.id)
             continue
+
         seller = db.query(models.User).filter(models.User.id == product.seller_id).first()
         currency = product.currency or "USD"
         totals_by_currency[currency] = totals_by_currency.get(currency, 0) + product.price
@@ -715,9 +776,11 @@ def get_cart(user_id: int, db: Session = Depends(get_db)):
             "seller_username": seller.username if seller else None,
             "seller_link": f"https://t.me/{seller.username}" if seller and seller.username else None,
         })
+
     if stale_ids:
         db.query(models.CartItem).filter(models.CartItem.id.in_(stale_ids)).delete(synchronize_session=False)
         db.commit()
+
     return {"items": result, "total": totals_by_currency.get("USD", 0), "totals_by_currency": totals_by_currency}
 
 
@@ -744,12 +807,19 @@ def buy_product(data: schemas.OrderCreate, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Товар не знайдено")
     if product.seller_id == buyer.id:
         raise HTTPException(status_code=400, detail="Не можна купити власний товар")
-    existing_pending = db.query(models.Order).filter(models.Order.product_id == product.id, models.Order.buyer_id == buyer.id, models.Order.status == "pending").first()
+
+    existing_pending = db.query(models.Order).filter(
+        models.Order.product_id == product.id,
+        models.Order.buyer_id == buyer.id,
+        models.Order.status == "pending"
+    ).first()
     if existing_pending:
         raise HTTPException(status_code=400, detail="Ви вже надіслали запит на покупку цього товару")
+
     seller = db.query(models.User).filter(models.User.id == product.seller_id).first()
     seller_username = seller.username if seller else None
     seller_link = f"https://t.me/{seller_username}" if seller_username else None
+
     db.add(models.Order(
         buyer_id=buyer.id,
         seller_id=product.seller_id,
@@ -763,8 +833,19 @@ def buy_product(data: schemas.OrderCreate, db: Session = Depends(get_db)):
         status="pending",
     ))
     db.commit()
-    created_order = db.query(models.Order).filter(models.Order.product_id == product.id, models.Order.buyer_id == buyer.id).order_by(models.Order.id.desc()).first()
-    return {"message": "Запит на покупку надіслано продавцю", "seller_username": seller_username, "seller_link": seller_link, "order_id": created_order.id if created_order else None, "status": "pending"}
+
+    created_order = db.query(models.Order).filter(
+        models.Order.product_id == product.id,
+        models.Order.buyer_id == buyer.id
+    ).order_by(models.Order.id.desc()).first()
+
+    return {
+        "message": "Запит на покупку надіслано продавцю",
+        "seller_username": seller_username,
+        "seller_link": seller_link,
+        "order_id": created_order.id if created_order else None,
+        "status": "pending",
+    }
 
 
 @app.post("/orders/{order_id}/decision")
@@ -779,13 +860,7 @@ def decide_order(order_id: int, data: schemas.OrderDecision, db: Session = Depen
 
     product = db.query(models.Product).filter(models.Product.id == order.product_id).first()
 
-    if not product:
-        order.status = "rejected"
-        order.seller_response_at = datetime.utcnow()
-        db.commit()
-        return {"message": "Товар уже недоступний, запит прибрано"}
-
-    if product.status != "active":
+    if not product or product.status != "active":
         order.status = "rejected"
         order.seller_response_at = datetime.utcnow()
         db.commit()
@@ -809,8 +884,6 @@ def decide_order(order_id: int, data: schemas.OrderDecision, db: Session = Depen
     return {"message": "Запит підтверджено" if data.approve else "Запит відхилено"}
 
 
-
-
 @app.post("/orders/{order_id}/review")
 def create_review(order_id: int, data: schemas.ReviewCreate, db: Session = Depends(get_db)):
     order = db.query(models.Order).filter(models.Order.id == order_id).first()
@@ -820,18 +893,27 @@ def create_review(order_id: int, data: schemas.ReviewCreate, db: Session = Depen
         raise HTTPException(status_code=403, detail="Це не ваше замовлення")
     if order.status != "approved":
         raise HTTPException(status_code=400, detail="Оцінити можна тільки підтверджену покупку")
+
     existing_review = db.query(models.Review).filter(models.Review.order_id == order.id).first()
     if existing_review:
         raise HTTPException(status_code=400, detail="Ви вже оцінили цю покупку")
     if not order.seller_id:
         raise HTTPException(status_code=400, detail="Продавця не знайдено")
 
-    review = models.Review(order_id=order.id, seller_id=order.seller_id, buyer_id=data.buyer_id, rating=data.rating, comment=normalize_text(data.comment) or None)
+    review = models.Review(
+        order_id=order.id,
+        seller_id=order.seller_id,
+        buyer_id=data.buyer_id,
+        rating=data.rating,
+        comment=normalize_text(data.comment) or None
+    )
     db.add(review)
+
     seller = db.query(models.User).filter(models.User.id == order.seller_id).first()
     if seller:
         seller.rating_sum = (seller.rating_sum or 0) + data.rating
         seller.rating_count = (seller.rating_count or 0) + 1
+
     db.commit()
     return {"message": "Дякуємо за оцінку", "rating": data.rating}
 
@@ -855,7 +937,13 @@ def admin_list_users(current_admin_id: int = Query(...), q: str | None = Query(d
     query = db.query(models.User)
     if q:
         q_clean = normalize_text(q)
-        query = query.filter(or_(models.User.username.ilike(f"%{q_clean}%"), models.User.full_name.ilike(f"%{q_clean}%")))
+        query = query.filter(
+            or_(
+                models.User.username.ilike(f"%{q_clean}%"),
+                models.User.full_name.ilike(f"%{q_clean}%")
+            )
+        )
+
     users = query.order_by(models.User.id.desc()).all()
     result = []
     for user in users:
@@ -932,13 +1020,17 @@ def admin_list_products(current_admin_id: int = Query(...), q: str | None = Quer
     query = db.query(models.Product)
     if q:
         q_clean = normalize_text(q)
-        query = query.filter(or_(models.Product.title.ilike(f"%{q_clean}%"), models.Product.description.ilike(f"%{q_clean}%")))
+        query = query.filter(
+            or_(
+                models.Product.title.ilike(f"%{q_clean}%"),
+                models.Product.description.ilike(f"%{q_clean}%")
+            )
+        )
     products = query.order_by(models.Product.id.desc()).all()
     result = []
     for product in products:
         seller = db.query(models.User).filter(models.User.id == product.seller_id).first()
-        item = serialize_product(db, product, seller, current_admin_id)
-        result.append(item)
+        result.append(serialize_product(db, product, seller, current_admin_id))
     return result
 
 
@@ -950,7 +1042,10 @@ def admin_archive_product(product_id: int, current_admin_id: int = Query(...), d
         raise HTTPException(status_code=404, detail="Товар не знайдено")
     product.status = "archived"
     sync_product_activity(product)
-    db.query(models.Order).filter(models.Order.product_id == product.id, models.Order.status == "pending").update({models.Order.status: "rejected"}, synchronize_session=False)
+    db.query(models.Order).filter(
+        models.Order.product_id == product.id,
+        models.Order.status == "pending"
+    ).update({models.Order.status: "rejected"}, synchronize_session=False)
     db.commit()
     log_admin_action(db, current_admin_id, f"archive product #{product.id}", "product", product.id)
     return {"message": "Оголошення перенесено в архів"}
@@ -962,6 +1057,7 @@ def admin_delete_product(product_id: int, current_admin_id: int = Query(...), db
     product = db.query(models.Product).filter(models.Product.id == product_id).first()
     if not product:
         raise HTTPException(status_code=404, detail="Товар не знайдено")
+
     db.query(models.ProductImage).filter(models.ProductImage.product_id == product.id).delete()
     db.query(models.CartItem).filter(models.CartItem.product_id == product.id).delete()
     db.query(models.Favorite).filter(models.Favorite.product_id == product.id).delete()
@@ -999,9 +1095,14 @@ def add_to_favorites(data: schemas.FavoriteCreate, db: Session = Depends(get_db)
     ensure_not_banned(user)
     if not product or product.status != "active":
         raise HTTPException(status_code=404, detail="Товар не знайдено")
-    existing = db.query(models.Favorite).filter(models.Favorite.user_id == user.id, models.Favorite.product_id == product.id).first()
+
+    existing = db.query(models.Favorite).filter(
+        models.Favorite.user_id == user.id,
+        models.Favorite.product_id == product.id
+    ).first()
     if existing:
         raise HTTPException(status_code=400, detail="Товар уже в обраному")
+
     db.add(models.Favorite(user_id=user.id, product_id=product.id))
     db.commit()
     return {"message": "Товар додано в обране"}
@@ -1009,7 +1110,10 @@ def add_to_favorites(data: schemas.FavoriteCreate, db: Session = Depends(get_db)
 
 @app.delete("/favorites")
 def remove_from_favorites(user_id: int = Query(...), product_id: int = Query(...), db: Session = Depends(get_db)):
-    favorite = db.query(models.Favorite).filter(models.Favorite.user_id == user_id, models.Favorite.product_id == product_id).first()
+    favorite = db.query(models.Favorite).filter(
+        models.Favorite.user_id == user_id,
+        models.Favorite.product_id == product_id
+    ).first()
     if not favorite:
         raise HTTPException(status_code=404, detail="Товар не знайдено в обраному")
     db.delete(favorite)
@@ -1022,9 +1126,11 @@ def get_favorites(user_id: int, db: Session = Depends(get_db)):
     user = db.query(models.User).filter(models.User.id == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="Користувача не знайдено")
+
     favorites = db.query(models.Favorite).filter(models.Favorite.user_id == user_id).order_by(models.Favorite.id.desc()).all()
     result = []
     stale_ids = []
+
     for favorite in favorites:
         product = db.query(models.Product).filter(models.Product.id == favorite.product_id).first()
         if not product or product.status != "active":
@@ -1032,9 +1138,9 @@ def get_favorites(user_id: int, db: Session = Depends(get_db)):
             continue
         seller = db.query(models.User).filter(models.User.id == product.seller_id).first()
         result.append(serialize_product(db, product, seller, user_id))
+
     if stale_ids:
         db.query(models.Favorite).filter(models.Favorite.id.in_(stale_ids)).delete(synchronize_session=False)
         db.commit()
+
     return result
-
-
