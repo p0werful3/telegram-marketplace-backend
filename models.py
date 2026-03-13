@@ -114,8 +114,19 @@ class Suggestion(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
-    username = Column(String, nullable=True)
     title = Column(String, nullable=False)
     message = Column(String, nullable=False)
+    status = Column(String, nullable=False, server_default="new")
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
+class Report(Base):
+    __tablename__ = "reports"
+
+    id = Column(Integer, primary_key=True, index=True)
+    reporter_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    listing_id = Column(Integer, ForeignKey("products.id"), nullable=False, index=True)
+    reason = Column(String, nullable=False)
+    comment = Column(String, nullable=True)
     status = Column(String, nullable=False, server_default="new")
     created_at = Column(DateTime(timezone=True), server_default=func.now())
