@@ -1,13 +1,16 @@
-
+from datetime import datetime
 from typing import Optional, List
-from pydantic import BaseModel, Field, validator
+from pydantic import BaseModel, Field
 
 
-class UserCreate(BaseModel):
+class UserBase(BaseModel):
     username: str
-    full_name: str
-    password: str
+    full_name: Optional[str] = None
     telegram_id: Optional[str] = None
+
+
+class UserCreate(UserBase):
+    password: str
 
 
 class UserLogin(BaseModel):
@@ -21,6 +24,13 @@ class TelegramLogin(BaseModel):
     full_name: Optional[str] = None
 
 
+class UserProfileUpdate(BaseModel):
+    username: str
+    full_name: Optional[str] = None
+    password: Optional[str] = None
+    avatar_url: Optional[str] = None
+
+
 class UserResponse(BaseModel):
     id: int
     telegram_id: Optional[str] = None
@@ -31,16 +41,10 @@ class UserResponse(BaseModel):
     is_banned: bool = False
     rating_sum: float = 0
     rating_count: int = 0
+    created_at: Optional[datetime] = None
 
     class Config:
-        orm_mode = True
-
-
-class UserProfileUpdate(BaseModel):
-    username: str
-    full_name: Optional[str] = None
-    avatar_url: Optional[str] = None
-    password: Optional[str] = None
+        from_attributes = True
 
 
 class ProductBase(BaseModel):
@@ -48,12 +52,12 @@ class ProductBase(BaseModel):
     title: str
     description: str
     price: float
-    currency: str = "USD"
+    currency: Optional[str] = "USD"
     category: str
-    condition: str = "Новий"
-    city: str = "Київ"
+    condition: str
+    city: str
     image_url: Optional[str] = None
-    image_urls: List[str] = Field(default_factory=list)
+    image_urls: Optional[List[str]] = None
 
 
 class ProductCreate(ProductBase):
@@ -62,6 +66,11 @@ class ProductCreate(ProductBase):
 
 class ProductUpdate(ProductBase):
     pass
+
+
+class FavoriteCreate(BaseModel):
+    user_id: int
+    product_id: int
 
 
 class CartAdd(BaseModel):
@@ -79,25 +88,10 @@ class OrderDecision(BaseModel):
     approve: bool
 
 
-class OrderCancel(BaseModel):
-    buyer_id: int
-
-
-class FavoriteCreate(BaseModel):
-    user_id: int
-    product_id: int
-
-
 class ReviewCreate(BaseModel):
     buyer_id: int
-    rating: int
+    rating: int = Field(ge=1, le=5)
     comment: Optional[str] = None
-
-    @validator("rating")
-    def validate_rating(cls, value: int) -> int:
-        if value < 1 or value > 5:
-            raise ValueError("Rating має бути від 1 до 5")
-        return value
 
 
 class SuggestionCreate(BaseModel):
