@@ -34,6 +34,7 @@ ALLOWED_CURRENCIES = {"USD", "UAH", "EUR"}
 def run_safe_migrations() -> None:
     queries = [
         "ALTER TABLE users ADD COLUMN IF NOT EXISTS password_hash VARCHAR",
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_url VARCHAR",
         "ALTER TABLE products ADD COLUMN IF NOT EXISTS image_url VARCHAR",
         "ALTER TABLE products ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT TRUE",
         "ALTER TABLE products ADD COLUMN IF NOT EXISTS condition VARCHAR DEFAULT 'Новий'",
@@ -48,6 +49,7 @@ def run_safe_migrations() -> None:
         "ALTER TABLE orders ADD COLUMN IF NOT EXISTS buyer_username VARCHAR",
         "ALTER TABLE orders ADD COLUMN IF NOT EXISTS buyer_full_name VARCHAR",
         "ALTER TABLE orders ADD COLUMN IF NOT EXISTS status VARCHAR DEFAULT 'pending'",
+        "ALTER TABLE orders ADD COLUMN IF NOT EXISTS created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()",
         "ALTER TABLE orders ADD COLUMN IF NOT EXISTS seller_response_at TIMESTAMP WITH TIME ZONE",
     ]
 
@@ -197,6 +199,7 @@ def serialize_product(db: Session, product: models.Product, seller: models.User 
         "seller_id": product.seller_id,
         "seller_username": seller.username if seller else None,
         "seller_name": seller.full_name if seller else None,
+        "seller_avatar_url": seller.avatar_url if seller else None,
         "seller_telegram_link": f"https://t.me/{seller.username}" if seller and seller.username else None,
         "is_favorite": is_favorite_product(db, current_user_id, product.id),
     }
@@ -335,6 +338,7 @@ def update_user_profile(user_id: int, data: schemas.UserProfileUpdate, db: Sessi
         raise HTTPException(status_code=404, detail="Користувача не знайдено")
     user.username = ensure_unique_username(db, data.username, exclude_user_id=user.id)
     user.full_name = normalize_text(data.full_name) if data.full_name else None
+    user.avatar_url = normalize_text(data.avatar_url) if data.avatar_url else None
     if data.password:
         user.password_hash = hash_password(data.password)
     db.commit()
@@ -356,6 +360,27 @@ def get_user_stats(user_id: int, db: Session = Depends(get_db)):
         "pending_requests": db.query(models.Order).filter(models.Order.seller_id == user_id, models.Order.status == "pending").count(),
         "purchase_history": db.query(models.Order).filter(models.Order.buyer_id == user_id).count(),
         "purchase_pending": db.query(models.Order).filter(models.Order.buyer_id == user_id, models.Order.status == "pending").count(),
+    }
+
+
+
+
+@app.get("/users/{user_id}/public-profile")
+def get_public_profile(user_id: int, db: Session = Depends(get_db)):
+    user = db.query(models.User).filter(models.User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="Користувача не знайдено")
+    return {
+        "id": user.id,
+        "username": user.username,
+        "full_name": user.full_name,
+        "avatar_url": user.avatar_url,
+        "telegram_link": f"https://t.me/{user.username}" if user.username else None,
+        "stats": {
+            "active_products": db.query(models.Product).filter(models.Product.seller_id == user_id, models.Product.status == "active").count(),
+            "sold_products": db.query(models.Product).filter(models.Product.seller_id == user_id, models.Product.status == "sold").count(),
+            "archived_products": db.query(models.Product).filter(models.Product.seller_id == user_id, models.Product.status == "archived").count(),
+        }
     }
 
 
@@ -691,6 +716,23 @@ def decide_order(order_id: int, data: schemas.OrderDecision, db: Session = Depen
 
     db.commit()
     return {"message": "Запит підтверджено" if data.approve else "Запит відхилено"}
+
+
+
+
+@app.post("/orders/{order_id}/cancel")
+def cancel_order(order_id: int, buyer_id: int = Query(...), db: Session = Depends(get_db)):
+    order = db.query(models.Order).filter(models.Order.id == order_id).first()
+    if not order:
+        raise HTTPException(status_code=404, detail="Запит не знайдено")
+    if order.buyer_id != buyer_id:
+        raise HTTPException(status_code=403, detail="Це не ваш запит")
+    if order.status != "pending":
+        raise HTTPException(status_code=400, detail="Скасувати можна тільки запит, який очікує")
+    order.status = "canceled"
+    order.seller_response_at = datetime.utcnow()
+    db.commit()
+    return {"message": "Запит скасовано"}
 
 
 @app.post("/favorites")
