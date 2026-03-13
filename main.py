@@ -1,5 +1,7 @@
 from datetime import datetime
 from hashlib import sha256
+from urllib.parse import parse_qsl
+import json
 
 from fastapi import FastAPI, Depends, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -402,14 +404,43 @@ def login_user(data: schemas.UserLogin, db: Session = Depends(get_db)):
     return user
 
 
+def parse_telegram_init_data(init_data: str | None) -> dict:
+    if not init_data:
+        return {}
+    try:
+        parsed = dict(parse_qsl(init_data, keep_blank_values=True))
+    except Exception:
+        return {}
+
+    user_raw = parsed.get("user")
+    if not user_raw:
+        return parsed
+
+    try:
+        user_obj = json.loads(user_raw)
+        if isinstance(user_obj, dict):
+            parsed["user_obj"] = user_obj
+    except Exception:
+        pass
+    return parsed
+
+
 @app.post("/auth/telegram", response_model=schemas.UserResponse)
 def telegram_login(data: schemas.TelegramLogin, db: Session = Depends(get_db)):
-    username = normalize_text(data.username)
-    full_name = normalize_text(data.full_name) if data.full_name else None
-    if not username:
-        raise HTTPException(status_code=400, detail="У Telegram акаунта немає username")
+    parsed = parse_telegram_init_data(data.init_data)
+    parsed_user = parsed.get("user_obj") or {}
 
-    user = db.query(models.User).filter(models.User.telegram_id == data.telegram_id).first()
+    telegram_id = normalize_text(data.telegram_id) or normalize_text(str(parsed_user.get("id") or parsed.get("id") or ""))
+    if not telegram_id:
+        raise HTTPException(status_code=400, detail="Не вдалося отримати Telegram ID")
+
+    username = normalize_text(data.username) or normalize_text(parsed_user.get("username"))
+    full_name = normalize_text(data.full_name) or normalize_text(f"{parsed_user.get('first_name', '')} {parsed_user.get('last_name', '')}") or None
+
+    if not username:
+        username = f"tg_{telegram_id}"
+
+    user = db.query(models.User).filter(models.User.telegram_id == telegram_id).first()
     if user:
         ensure_not_banned(user)
         user.username = username
@@ -421,7 +452,7 @@ def telegram_login(data: schemas.TelegramLogin, db: Session = Depends(get_db)):
     existing_username = db.query(models.User).filter(models.User.username == username).first()
     if existing_username:
         ensure_not_banned(existing_username)
-        existing_username.telegram_id = data.telegram_id
+        existing_username.telegram_id = telegram_id
         if full_name:
             existing_username.full_name = full_name
         db.commit()
@@ -429,7 +460,7 @@ def telegram_login(data: schemas.TelegramLogin, db: Session = Depends(get_db)):
         return existing_username
 
     new_user = models.User(
-        telegram_id=data.telegram_id,
+        telegram_id=telegram_id,
         username=username,
         full_name=full_name,
         password_hash=None,
@@ -908,6 +939,12 @@ def buy_product(data: schemas.OrderCreate, db: Session = Depends(get_db)):
     ))
     db.commit()
 
+    db.query(models.CartItem).filter(
+        models.CartItem.user_id == buyer.id,
+        models.CartItem.product_id == product.id
+    ).delete(synchronize_session=False)
+    db.commit()
+
     created_order = db.query(models.Order).filter(
         models.Order.product_id == product.id,
         models.Order.buyer_id == buyer.id
@@ -920,6 +957,66 @@ def buy_product(data: schemas.OrderCreate, db: Session = Depends(get_db)):
         "order_id": created_order.id if created_order else None,
         "status": "pending",
     }
+
+
+
+
+@app.post("/orders/buy-all")
+def buy_all_from_cart(user_id: int = Query(...), db: Session = Depends(get_db)):
+    buyer = db.query(models.User).filter(models.User.id == user_id).first()
+    if not buyer:
+        raise HTTPException(status_code=404, detail="Покупця не знайдено")
+    ensure_not_banned(buyer)
+
+    cart_items = db.query(models.CartItem).filter(models.CartItem.user_id == buyer.id).order_by(models.CartItem.id.asc()).all()
+    if not cart_items:
+        raise HTTPException(status_code=400, detail="Кошик порожній")
+
+    created = 0
+    skipped = []
+
+    for cart_item in cart_items:
+        product = db.query(models.Product).filter(models.Product.id == cart_item.product_id).first()
+        if not product or product.status != "active":
+            skipped.append({"product_id": cart_item.product_id, "reason": "not_active"})
+            continue
+        if product.seller_id == buyer.id:
+            skipped.append({"product_id": product.id, "reason": "own_product"})
+            continue
+
+        existing_pending = db.query(models.Order).filter(
+            models.Order.product_id == product.id,
+            models.Order.buyer_id == buyer.id,
+            models.Order.status == "pending"
+        ).first()
+        if existing_pending:
+            skipped.append({"product_id": product.id, "reason": "already_pending"})
+            continue
+
+        seller = db.query(models.User).filter(models.User.id == product.seller_id).first()
+        seller_username = seller.username if seller else None
+        seller_link = f"https://t.me/{seller_username}" if seller_username else None
+
+        db.add(models.Order(
+            buyer_id=buyer.id,
+            seller_id=product.seller_id,
+            product_id=product.id,
+            offered_price=product.price,
+            currency=product.currency or "USD",
+            buyer_username=buyer.username,
+            buyer_full_name=buyer.full_name,
+            seller_username=seller_username,
+            seller_link=seller_link,
+            status="pending",
+        ))
+        created += 1
+
+    db.commit()
+
+    db.query(models.CartItem).filter(models.CartItem.user_id == buyer.id).delete(synchronize_session=False)
+    db.commit()
+
+    return {"message": f"Оформлено запити: {created}", "created": created, "skipped": skipped}
 
 
 @app.post("/orders/{order_id}/decision")
