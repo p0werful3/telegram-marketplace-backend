@@ -34,7 +34,6 @@ ALLOWED_CURRENCIES = {"USD", "UAH", "EUR"}
 def run_safe_migrations() -> None:
     queries = [
         "ALTER TABLE users ADD COLUMN IF NOT EXISTS password_hash VARCHAR",
-        "ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_url VARCHAR",
         "ALTER TABLE products ADD COLUMN IF NOT EXISTS image_url VARCHAR",
         "ALTER TABLE products ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT TRUE",
         "ALTER TABLE products ADD COLUMN IF NOT EXISTS condition VARCHAR DEFAULT 'Новий'",
@@ -49,7 +48,6 @@ def run_safe_migrations() -> None:
         "ALTER TABLE orders ADD COLUMN IF NOT EXISTS buyer_username VARCHAR",
         "ALTER TABLE orders ADD COLUMN IF NOT EXISTS buyer_full_name VARCHAR",
         "ALTER TABLE orders ADD COLUMN IF NOT EXISTS status VARCHAR DEFAULT 'pending'",
-        "ALTER TABLE orders ADD COLUMN IF NOT EXISTS created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()",
         "ALTER TABLE orders ADD COLUMN IF NOT EXISTS seller_response_at TIMESTAMP WITH TIME ZONE",
     ]
 
@@ -57,6 +55,12 @@ def run_safe_migrations() -> None:
         for query in queries:
             conn.execute(text(query))
 
+        conn.execute(text("UPDATE users SET is_admin=FALSE WHERE is_admin IS NULL"))
+        conn.execute(text("UPDATE users SET is_banned=FALSE WHERE is_banned IS NULL"))
+        conn.execute(text("UPDATE users SET rating_sum=0 WHERE rating_sum IS NULL"))
+        conn.execute(text("UPDATE users SET rating_count=0 WHERE rating_count IS NULL"))
+        conn.execute(text("CREATE TABLE IF NOT EXISTS reviews (id SERIAL PRIMARY KEY, order_id INTEGER UNIQUE NOT NULL REFERENCES orders(id), seller_id INTEGER NOT NULL REFERENCES users(id), buyer_id INTEGER NOT NULL REFERENCES users(id), rating INTEGER NOT NULL, comment VARCHAR, created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW())"))
+        conn.execute(text("CREATE TABLE IF NOT EXISTS admin_logs (id SERIAL PRIMARY KEY, admin_id INTEGER NOT NULL REFERENCES users(id), action VARCHAR NOT NULL, target_type VARCHAR, target_id INTEGER, created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW())"))
         conn.execute(text("UPDATE products SET condition='Новий' WHERE condition IS NULL OR condition=''"))
         conn.execute(text("UPDATE products SET city='Київ' WHERE city IS NULL OR city=''"))
         conn.execute(text("UPDATE products SET currency='USD' WHERE currency IS NULL OR currency=''"))
@@ -130,6 +134,32 @@ def normalize_text(value: str | None) -> str:
     return " ".join((value or "").strip().split())
 
 
+def rating_value(user: models.User | None) -> float:
+    if not user or not user.rating_count:
+        return 0.0
+    return round((user.rating_sum or 0) / user.rating_count, 2)
+
+
+def ensure_not_banned(user: models.User | None) -> None:
+    if user and user.is_banned:
+        raise HTTPException(status_code=403, detail="Користувача заблоковано")
+
+
+def require_admin(db: Session, user_id: int) -> models.User:
+    user = db.query(models.User).filter(models.User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="Адміністратора не знайдено")
+    ensure_not_banned(user)
+    if not user.is_admin:
+        raise HTTPException(status_code=403, detail="Немає доступу до адмінки")
+    return user
+
+
+def log_admin_action(db: Session, admin_id: int, action: str, target_type: str | None = None, target_id: int | None = None) -> None:
+    db.add(models.AdminLog(admin_id=admin_id, action=action, target_type=target_type, target_id=target_id))
+    db.commit()
+
+
 def normalize_currency(value: str | None) -> str:
     currency = normalize_text(value).upper() or "USD"
     if currency not in ALLOWED_CURRENCIES:
@@ -192,14 +222,12 @@ def serialize_product(db: Session, product: models.Product, seller: models.User 
         "condition": product.condition,
         "city": product.city,
         "status": product.status,
-        "created_at": product.created_at.isoformat() if product.created_at else None,
         "image_url": fallback_first,
         "image_urls": image_urls,
         "is_active": product.is_active,
         "seller_id": product.seller_id,
         "seller_username": seller.username if seller else None,
         "seller_name": seller.full_name if seller else None,
-        "seller_avatar_url": seller.avatar_url if seller else None,
         "seller_telegram_link": f"https://t.me/{seller.username}" if seller and seller.username else None,
         "is_favorite": is_favorite_product(db, current_user_id, product.id),
     }
@@ -258,7 +286,6 @@ def _serialize_simple_my_product(product: models.Product, db: Session):
         "condition": product.condition,
         "city": product.city,
         "status": product.status,
-        "created_at": product.created_at.isoformat() if product.created_at else None,
         "image_url": product.image_url,
         "image_urls": get_product_images(db, product.id) or ([product.image_url] if product.image_url else []),
         "is_active": product.is_active,
@@ -292,6 +319,7 @@ def login_user(data: schemas.UserLogin, db: Session = Depends(get_db)):
     user = db.query(models.User).filter(models.User.username == username).first()
     if not user or not user.password_hash or not verify_password(data.password, user.password_hash):
         raise HTTPException(status_code=401, detail="Невірний username або password")
+    ensure_not_banned(user)
     return user
 
 
@@ -303,6 +331,7 @@ def telegram_login(data: schemas.TelegramLogin, db: Session = Depends(get_db)):
         raise HTTPException(status_code=400, detail="У Telegram акаунта немає username")
     user = db.query(models.User).filter(models.User.telegram_id == data.telegram_id).first()
     if user:
+        ensure_not_banned(user)
         user.username = username
         user.full_name = full_name
         db.commit()
@@ -310,6 +339,7 @@ def telegram_login(data: schemas.TelegramLogin, db: Session = Depends(get_db)):
         return user
     existing_username = db.query(models.User).filter(models.User.username == username).first()
     if existing_username:
+        ensure_not_banned(existing_username)
         existing_username.telegram_id = data.telegram_id
         if full_name:
             existing_username.full_name = full_name
@@ -338,7 +368,6 @@ def update_user_profile(user_id: int, data: schemas.UserProfileUpdate, db: Sessi
         raise HTTPException(status_code=404, detail="Користувача не знайдено")
     user.username = ensure_unique_username(db, data.username, exclude_user_id=user.id)
     user.full_name = normalize_text(data.full_name) if data.full_name else None
-    user.avatar_url = normalize_text(data.avatar_url) if data.avatar_url else None
     if data.password:
         user.password_hash = hash_password(data.password)
     db.commit()
@@ -363,32 +392,12 @@ def get_user_stats(user_id: int, db: Session = Depends(get_db)):
     }
 
 
-
-
-@app.get("/users/{user_id}/public-profile")
-def get_public_profile(user_id: int, db: Session = Depends(get_db)):
-    user = db.query(models.User).filter(models.User.id == user_id).first()
-    if not user:
-        raise HTTPException(status_code=404, detail="Користувача не знайдено")
-    return {
-        "id": user.id,
-        "username": user.username,
-        "full_name": user.full_name,
-        "avatar_url": user.avatar_url,
-        "telegram_link": f"https://t.me/{user.username}" if user.username else None,
-        "stats": {
-            "active_products": db.query(models.Product).filter(models.Product.seller_id == user_id, models.Product.status == "active").count(),
-            "sold_products": db.query(models.Product).filter(models.Product.seller_id == user_id, models.Product.status == "sold").count(),
-            "archived_products": db.query(models.Product).filter(models.Product.seller_id == user_id, models.Product.status == "archived").count(),
-        }
-    }
-
-
 @app.post("/products")
 def create_product(product: schemas.ProductCreate, db: Session = Depends(get_db)):
     seller = db.query(models.User).filter(models.User.id == product.seller_id).first()
     if not seller:
         raise HTTPException(status_code=404, detail="Продавця не знайдено")
+    ensure_not_banned(seller)
     payload = validate_and_prepare_product_payload(product)
     new_product = models.Product(
         seller_id=seller.id,
@@ -418,6 +427,8 @@ def update_product(product_id: int, product: schemas.ProductUpdate, db: Session 
         raise HTTPException(status_code=404, detail="Товар не знайдено")
     if existing.seller_id != product.seller_id:
         raise HTTPException(status_code=403, detail="Це не ваше оголошення")
+    owner = db.query(models.User).filter(models.User.id == product.seller_id).first()
+    ensure_not_banned(owner)
     if existing.status != "active":
         raise HTTPException(status_code=400, detail="Редагувати можна тільки активне оголошення")
     payload = validate_and_prepare_product_payload(product)
@@ -520,6 +531,7 @@ def get_purchase_requests(user_id: int, status: str = Query(default="pending"), 
         product = db.query(models.Product).filter(models.Product.id == order.product_id).first()
         if not product:
             continue
+        review = db.query(models.Review).filter(models.Review.order_id == order.id).first()
         result.append({
             "order_id": order.id,
             "status": order.status,
@@ -546,6 +558,7 @@ def get_purchase_history(user_id: int, db: Session = Depends(get_db)):
     for order in orders:
         product = db.query(models.Product).filter(models.Product.id == order.product_id).first()
         seller = db.query(models.User).filter(models.User.id == order.seller_id).first() if order.seller_id else None
+        review = db.query(models.Review).filter(models.Review.order_id == order.id).first()
         result.append({
             "order_id": order.id,
             "status": order.status,
@@ -560,6 +573,8 @@ def get_purchase_history(user_id: int, db: Session = Depends(get_db)):
             "seller_id": order.seller_id,
             "seller_username": seller.username if seller else order.seller_username,
             "seller_full_name": seller.full_name if seller else None,
+            "can_review": order.status == "approved" and review is None,
+            "review_rating": review.rating if review else None,
         })
     return result
 
@@ -586,6 +601,7 @@ def add_to_cart(data: schemas.CartAdd, db: Session = Depends(get_db)):
     product = db.query(models.Product).filter(models.Product.id == data.product_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="Користувача не знайдено")
+    ensure_not_banned(user)
     if not product or product.status != "active":
         raise HTTPException(status_code=404, detail="Товар не знайдено")
     if product.seller_id == user.id:
@@ -649,6 +665,7 @@ def buy_product(data: schemas.OrderCreate, db: Session = Depends(get_db)):
     product = db.query(models.Product).filter(models.Product.id == data.product_id).first()
     if not buyer:
         raise HTTPException(status_code=404, detail="Покупця не знайдено")
+    ensure_not_banned(buyer)
     if not product or product.status != "active":
         raise HTTPException(status_code=404, detail="Товар не знайдено")
     if product.seller_id == buyer.id:
@@ -720,19 +737,183 @@ def decide_order(order_id: int, data: schemas.OrderDecision, db: Session = Depen
 
 
 
-@app.post("/orders/{order_id}/cancel")
-def cancel_order(order_id: int, buyer_id: int = Query(...), db: Session = Depends(get_db)):
+@app.post("/orders/{order_id}/review")
+def create_review(order_id: int, data: schemas.ReviewCreate, db: Session = Depends(get_db)):
     order = db.query(models.Order).filter(models.Order.id == order_id).first()
     if not order:
-        raise HTTPException(status_code=404, detail="Запит не знайдено")
-    if order.buyer_id != buyer_id:
-        raise HTTPException(status_code=403, detail="Це не ваш запит")
-    if order.status != "pending":
-        raise HTTPException(status_code=400, detail="Скасувати можна тільки запит, який очікує")
-    order.status = "canceled"
-    order.seller_response_at = datetime.utcnow()
+        raise HTTPException(status_code=404, detail="Замовлення не знайдено")
+    if order.buyer_id != data.buyer_id:
+        raise HTTPException(status_code=403, detail="Це не ваше замовлення")
+    if order.status != "approved":
+        raise HTTPException(status_code=400, detail="Оцінити можна тільки підтверджену покупку")
+    existing_review = db.query(models.Review).filter(models.Review.order_id == order.id).first()
+    if existing_review:
+        raise HTTPException(status_code=400, detail="Ви вже оцінили цю покупку")
+    if not order.seller_id:
+        raise HTTPException(status_code=400, detail="Продавця не знайдено")
+
+    review = models.Review(order_id=order.id, seller_id=order.seller_id, buyer_id=data.buyer_id, rating=data.rating, comment=normalize_text(data.comment) or None)
+    db.add(review)
+    seller = db.query(models.User).filter(models.User.id == order.seller_id).first()
+    if seller:
+        seller.rating_sum = (seller.rating_sum or 0) + data.rating
+        seller.rating_count = (seller.rating_count or 0) + 1
     db.commit()
-    return {"message": "Запит скасовано"}
+    return {"message": "Дякуємо за оцінку", "rating": data.rating}
+
+
+@app.get("/admin/summary")
+def get_admin_summary(current_admin_id: int = Query(...), db: Session = Depends(get_db)):
+    require_admin(db, current_admin_id)
+    return {
+        "users": db.query(models.User).count(),
+        "banned_users": db.query(models.User).filter(models.User.is_banned == True).count(),
+        "products": db.query(models.Product).count(),
+        "active_products": db.query(models.Product).filter(models.Product.status == "active").count(),
+        "orders_pending": db.query(models.Order).filter(models.Order.status == "pending").count(),
+        "admins": db.query(models.User).filter(models.User.is_admin == True).count(),
+    }
+
+
+@app.get("/admin/users")
+def admin_list_users(current_admin_id: int = Query(...), q: str | None = Query(default=None), db: Session = Depends(get_db)):
+    require_admin(db, current_admin_id)
+    query = db.query(models.User)
+    if q:
+        q_clean = normalize_text(q)
+        query = query.filter(or_(models.User.username.ilike(f"%{q_clean}%"), models.User.full_name.ilike(f"%{q_clean}%")))
+    users = query.order_by(models.User.id.desc()).all()
+    result = []
+    for user in users:
+        result.append({
+            "id": user.id,
+            "username": user.username,
+            "full_name": user.full_name,
+            "avatar_url": user.avatar_url,
+            "is_admin": user.is_admin,
+            "is_banned": user.is_banned,
+            "rating": rating_value(user),
+            "rating_count": user.rating_count or 0,
+            "active_products": db.query(models.Product).filter(models.Product.seller_id == user.id, models.Product.status == "active").count(),
+            "sold_products": db.query(models.Product).filter(models.Product.seller_id == user.id, models.Product.status == "sold").count(),
+        })
+    return result
+
+
+@app.post("/admin/users/{user_id}/ban")
+def admin_ban_user(user_id: int, current_admin_id: int = Query(...), db: Session = Depends(get_db)):
+    require_admin(db, current_admin_id)
+    user = db.query(models.User).filter(models.User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="Користувача не знайдено")
+    if user.id == current_admin_id:
+        raise HTTPException(status_code=400, detail="Не можна заблокувати самого себе")
+    user.is_banned = True
+    db.commit()
+    log_admin_action(db, current_admin_id, f"ban @{user.username}", "user", user.id)
+    return {"message": "Користувача заблоковано"}
+
+
+@app.post("/admin/users/{user_id}/unban")
+def admin_unban_user(user_id: int, current_admin_id: int = Query(...), db: Session = Depends(get_db)):
+    require_admin(db, current_admin_id)
+    user = db.query(models.User).filter(models.User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="Користувача не знайдено")
+    user.is_banned = False
+    db.commit()
+    log_admin_action(db, current_admin_id, f"unban @{user.username}", "user", user.id)
+    return {"message": "Користувача розблоковано"}
+
+
+@app.post("/admin/users/{user_id}/make-admin")
+def admin_make_admin(user_id: int, current_admin_id: int = Query(...), db: Session = Depends(get_db)):
+    require_admin(db, current_admin_id)
+    user = db.query(models.User).filter(models.User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="Користувача не знайдено")
+    user.is_admin = True
+    db.commit()
+    log_admin_action(db, current_admin_id, f"make-admin @{user.username}", "user", user.id)
+    return {"message": "Адміна додано"}
+
+
+@app.post("/admin/users/{user_id}/remove-admin")
+def admin_remove_admin(user_id: int, current_admin_id: int = Query(...), db: Session = Depends(get_db)):
+    require_admin(db, current_admin_id)
+    user = db.query(models.User).filter(models.User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="Користувача не знайдено")
+    if user.id == current_admin_id:
+        raise HTTPException(status_code=400, detail="Не можна забрати адмінку у самого себе")
+    user.is_admin = False
+    db.commit()
+    log_admin_action(db, current_admin_id, f"remove-admin @{user.username}", "user", user.id)
+    return {"message": "Адміна прибрано"}
+
+
+@app.get("/admin/products")
+def admin_list_products(current_admin_id: int = Query(...), q: str | None = Query(default=None), db: Session = Depends(get_db)):
+    require_admin(db, current_admin_id)
+    query = db.query(models.Product)
+    if q:
+        q_clean = normalize_text(q)
+        query = query.filter(or_(models.Product.title.ilike(f"%{q_clean}%"), models.Product.description.ilike(f"%{q_clean}%")))
+    products = query.order_by(models.Product.id.desc()).all()
+    result = []
+    for product in products:
+        seller = db.query(models.User).filter(models.User.id == product.seller_id).first()
+        item = serialize_product(db, product, seller, current_admin_id)
+        result.append(item)
+    return result
+
+
+@app.post("/admin/products/{product_id}/archive")
+def admin_archive_product(product_id: int, current_admin_id: int = Query(...), db: Session = Depends(get_db)):
+    require_admin(db, current_admin_id)
+    product = db.query(models.Product).filter(models.Product.id == product_id).first()
+    if not product:
+        raise HTTPException(status_code=404, detail="Товар не знайдено")
+    product.status = "archived"
+    sync_product_activity(product)
+    db.query(models.Order).filter(models.Order.product_id == product.id, models.Order.status == "pending").update({models.Order.status: "rejected"}, synchronize_session=False)
+    db.commit()
+    log_admin_action(db, current_admin_id, f"archive product #{product.id}", "product", product.id)
+    return {"message": "Оголошення перенесено в архів"}
+
+
+@app.delete("/admin/products/{product_id}")
+def admin_delete_product(product_id: int, current_admin_id: int = Query(...), db: Session = Depends(get_db)):
+    require_admin(db, current_admin_id)
+    product = db.query(models.Product).filter(models.Product.id == product_id).first()
+    if not product:
+        raise HTTPException(status_code=404, detail="Товар не знайдено")
+    db.query(models.ProductImage).filter(models.ProductImage.product_id == product.id).delete()
+    db.query(models.CartItem).filter(models.CartItem.product_id == product.id).delete()
+    db.query(models.Favorite).filter(models.Favorite.product_id == product.id).delete()
+    db.query(models.Order).filter(models.Order.product_id == product.id).delete()
+    db.delete(product)
+    db.commit()
+    log_admin_action(db, current_admin_id, f"delete product #{product_id}", "product", product_id)
+    return {"message": "Оголошення видалено"}
+
+
+@app.get("/admin/logs")
+def admin_logs(current_admin_id: int = Query(...), db: Session = Depends(get_db)):
+    require_admin(db, current_admin_id)
+    logs = db.query(models.AdminLog).order_by(models.AdminLog.id.desc()).limit(100).all()
+    result = []
+    for item in logs:
+        admin = db.query(models.User).filter(models.User.id == item.admin_id).first()
+        result.append({
+            "id": item.id,
+            "action": item.action,
+            "target_type": item.target_type,
+            "target_id": item.target_id,
+            "created_at": item.created_at.isoformat() if item.created_at else None,
+            "admin_username": admin.username if admin else None,
+        })
+    return result
 
 
 @app.post("/favorites")
@@ -741,6 +922,7 @@ def add_to_favorites(data: schemas.FavoriteCreate, db: Session = Depends(get_db)
     product = db.query(models.Product).filter(models.Product.id == data.product_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="Користувача не знайдено")
+    ensure_not_banned(user)
     if not product or product.status != "active":
         raise HTTPException(status_code=404, detail="Товар не знайдено")
     existing = db.query(models.Favorite).filter(models.Favorite.user_id == user.id, models.Favorite.product_id == product.id).first()
