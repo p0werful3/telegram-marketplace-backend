@@ -431,6 +431,8 @@ def telegram_login(data: schemas.TelegramLogin, db: Session = Depends(get_db)):
     parsed_user = parsed.get("user_obj") or {}
 
     telegram_id = normalize_text(data.telegram_id) or normalize_text(str(parsed_user.get("id") or parsed.get("id") or ""))
+    if not telegram_id and data.username:
+        telegram_id = f"fallback_{normalize_text(data.username)}"
     if not telegram_id:
         raise HTTPException(status_code=400, detail="Не вдалося отримати Telegram ID")
 
