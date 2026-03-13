@@ -99,6 +99,22 @@ def run_safe_migrations() -> None:
             )
         )
 
+        conn.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS suggestions (
+                    id SERIAL PRIMARY KEY,
+                    user_id INTEGER NOT NULL REFERENCES users(id),
+                    username VARCHAR,
+                    title VARCHAR NOT NULL,
+                    message VARCHAR NOT NULL,
+                    status VARCHAR DEFAULT 'new',
+                    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+                )
+                """
+            )
+        )
+
         conn.execute(text("UPDATE products SET condition='Новий' WHERE condition IS NULL OR condition=''"))
         conn.execute(text("UPDATE products SET city='Київ' WHERE city IS NULL OR city=''"))
         conn.execute(text("UPDATE products SET currency='USD' WHERE currency IS NULL OR currency=''"))
@@ -273,6 +289,7 @@ def serialize_product(db: Session, product: models.Product, seller: models.User 
         "seller_rating_count": seller.rating_count if seller else 0,
         "seller_telegram_link": f"https://t.me/{seller.username}" if seller and seller.username else None,
         "is_favorite": is_favorite_product(db, current_user_id, product.id),
+        "created_at": product.created_at.isoformat() if product.created_at else None,
     }
 
 
@@ -438,6 +455,8 @@ def get_public_profile(user_id: int, db: Session = Depends(get_db)):
         models.Product.status == "archived"
     ).count()
 
+    reviews_count = db.query(models.Review).filter(models.Review.seller_id == user.id).count()
+
     return {
         "id": user.id,
         "username": user.username,
@@ -446,11 +465,33 @@ def get_public_profile(user_id: int, db: Session = Depends(get_db)):
         "is_admin": user.is_admin,
         "rating": rating_value(user),
         "rating_count": user.rating_count or 0,
+        "reviews_count": reviews_count,
         "active_products": active_products,
         "sold_products": sold_products,
         "archived_products": archived_products,
         "telegram_link": f"https://t.me/{user.username}" if user.username else None,
     }
+
+
+@app.get("/users/{user_id}/reviews")
+def get_user_reviews(user_id: int, db: Session = Depends(get_db)):
+    user = db.query(models.User).filter(models.User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="Користувача не знайдено")
+
+    reviews = db.query(models.Review).filter(models.Review.seller_id == user_id).order_by(models.Review.id.desc()).all()
+    result = []
+    for review in reviews:
+        buyer = db.query(models.User).filter(models.User.id == review.buyer_id).first()
+        result.append({
+            "id": review.id,
+            "rating": review.rating,
+            "comment": review.comment,
+            "created_at": review.created_at.isoformat() if review.created_at else None,
+            "buyer_username": buyer.username if buyer else None,
+            "buyer_full_name": buyer.full_name if buyer else None,
+        })
+    return result
 
 
 @app.put("/users/{user_id}/profile", response_model=schemas.UserResponse)
@@ -582,10 +623,14 @@ def get_products(
         query = query.order_by(models.Product.price.asc(), models.Product.id.desc())
     elif sort == "price_desc":
         query = query.order_by(models.Product.price.desc(), models.Product.id.desc())
+    elif sort == "oldest":
+        query = query.order_by(models.Product.id.asc())
     else:
         query = query.order_by(models.Product.id.desc())
 
     products = query.all()
+    if sort == "rating_desc":
+        products.sort(key=lambda product: rating_value(db.query(models.User).filter(models.User.id == product.seller_id).first()), reverse=True)
     return [
         serialize_product(
             db,
@@ -949,6 +994,57 @@ def create_review(order_id: int, data: schemas.ReviewCreate, db: Session = Depen
     return {"message": "Дякуємо за оцінку", "rating": data.rating}
 
 
+@app.post("/suggestions")
+def create_suggestion(data: schemas.SuggestionCreate, db: Session = Depends(get_db)):
+    user = db.query(models.User).filter(models.User.id == data.user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="Користувача не знайдено")
+    ensure_not_banned(user)
+
+    title = normalize_text(data.title)
+    message = normalize_text(data.message)
+    if len(title) < 3:
+        raise HTTPException(status_code=400, detail="Назва ідеї має бути мінімум 3 символи")
+    if len(message) < 5:
+        raise HTTPException(status_code=400, detail="Опишіть ідею детальніше")
+
+    suggestion = models.Suggestion(user_id=user.id, username=user.username, title=title, message=message, status="new")
+    db.add(suggestion)
+    db.commit()
+    db.refresh(suggestion)
+    return {"message": "Ідею надіслано", "suggestion_id": suggestion.id}
+
+
+@app.get("/admin/suggestions")
+def admin_list_suggestions(current_admin_id: int = Query(...), db: Session = Depends(get_db)):
+    require_admin(db, current_admin_id)
+    items = db.query(models.Suggestion).order_by(models.Suggestion.id.desc()).all()
+    return [{
+        "id": item.id,
+        "user_id": item.user_id,
+        "username": item.username,
+        "title": item.title,
+        "message": item.message,
+        "status": item.status,
+        "created_at": item.created_at.isoformat() if item.created_at else None,
+    } for item in items]
+
+
+@app.post("/admin/suggestions/{suggestion_id}/status")
+def admin_update_suggestion_status(suggestion_id: int, data: schemas.SuggestionStatusUpdate, current_admin_id: int = Query(...), db: Session = Depends(get_db)):
+    require_admin(db, current_admin_id)
+    suggestion = db.query(models.Suggestion).filter(models.Suggestion.id == suggestion_id).first()
+    if not suggestion:
+        raise HTTPException(status_code=404, detail="Ідею не знайдено")
+    new_status = normalize_text(data.status).lower()
+    if new_status not in {"new", "reviewed", "done"}:
+        raise HTTPException(status_code=400, detail="Некоректний статус")
+    suggestion.status = new_status
+    db.commit()
+    log_admin_action(db, current_admin_id, f"suggestion {new_status} #{suggestion.id}", "suggestion", suggestion.id)
+    return {"message": "Статус оновлено", "status": suggestion.status}
+
+
 @app.get("/admin/summary")
 def get_admin_summary(current_admin_id: int = Query(...), db: Session = Depends(get_db)):
     require_admin(db, current_admin_id)
@@ -959,6 +1055,8 @@ def get_admin_summary(current_admin_id: int = Query(...), db: Session = Depends(
         "active_products": db.query(models.Product).filter(models.Product.status == "active").count(),
         "orders_pending": db.query(models.Order).filter(models.Order.status == "pending").count(),
         "admins": db.query(models.User).filter(models.User.is_admin == True).count(),
+        "suggestions": db.query(models.Suggestion).count(),
+        "new_suggestions": db.query(models.Suggestion).filter(models.Suggestion.status == "new").count(),
     }
 
 
@@ -1083,6 +1181,21 @@ def admin_archive_product(product_id: int, current_admin_id: int = Query(...), d
     db.commit()
     log_admin_action(db, current_admin_id, f"archive product #{product.id}", "product", product.id)
     return {"message": "Оголошення перенесено в архів"}
+
+
+@app.post("/admin/products/{product_id}/restore")
+def admin_restore_product(product_id: int, current_admin_id: int = Query(...), db: Session = Depends(get_db)):
+    require_admin(db, current_admin_id)
+    product = db.query(models.Product).filter(models.Product.id == product_id).first()
+    if not product:
+        raise HTTPException(status_code=404, detail="Товар не знайдено")
+    if product.status == "sold":
+        raise HTTPException(status_code=400, detail="Продане оголошення не можна відновити")
+    product.status = "active"
+    sync_product_activity(product)
+    db.commit()
+    log_admin_action(db, current_admin_id, f"restore product #{product.id}", "product", product.id)
+    return {"message": "Оголошення відновлено"}
 
 
 @app.delete("/admin/products/{product_id}")
