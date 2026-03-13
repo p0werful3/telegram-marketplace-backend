@@ -27,7 +27,6 @@ class TelegramLogin(BaseModel):
 class UserProfileUpdate(BaseModel):
     username: str = Field(min_length=3, max_length=50)
     full_name: Optional[str] = Field(default=None, max_length=100)
-    avatar_url: Optional[str] = Field(default=None, max_length=1000)
     password: Optional[str] = Field(default=None, min_length=4, max_length=128)
 
 
@@ -36,7 +35,6 @@ class UserResponse(BaseModel):
     telegram_id: Optional[str] = None
     username: str
     full_name: Optional[str] = None
-    avatar_url: Optional[str] = None
 
     class Config:
         from_attributes = True
@@ -69,14 +67,12 @@ class ProductResponse(BaseModel):
     condition: str
     city: str
     status: str
-    created_at: Optional[str] = None
     image_url: Optional[str] = None
     image_urls: List[str] = []
     is_active: bool
     seller_id: int
     seller_username: Optional[str] = None
     seller_name: Optional[str] = None
-    seller_avatar_url: Optional[str] = None
     seller_telegram_link: Optional[str] = None
     is_favorite: bool = False
 
@@ -102,3 +98,9 @@ class OrderDecision(BaseModel):
 class FavoriteCreate(BaseModel):
     user_id: int
     product_id: int
+
+
+class ReviewCreate(BaseModel):
+    buyer_id: int
+    rating: int = Field(ge=1, le=5)
+    comment: Optional[str] = Field(default=None, max_length=500)
