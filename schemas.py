@@ -97,3 +97,13 @@ class ReviewCreate(BaseModel):
         if value < 1 or value > 5:
             raise ValueError("Rating має бути від 1 до 5")
         return value
+
+
+class SuggestionCreate(BaseModel):
+    user_id: int
+    title: str
+    message: str
+
+
+class SuggestionStatusUpdate(BaseModel):
+    status: str
