@@ -19,9 +19,10 @@ class UserLogin(BaseModel):
 
 
 class TelegramLogin(BaseModel):
-    telegram_id: str
-    username: str
+    telegram_id: Optional[str] = None
+    username: Optional[str] = None
     full_name: Optional[str] = None
+    init_data: Optional[str] = None
 
 
 class UserProfileUpdate(BaseModel):
