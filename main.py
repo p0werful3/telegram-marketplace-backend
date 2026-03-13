@@ -269,6 +269,8 @@ def serialize_product(db: Session, product: models.Product, seller: models.User 
         "seller_id": product.seller_id,
         "seller_username": seller.username if seller else None,
         "seller_name": seller.full_name if seller else None,
+        "seller_rating": rating_value(seller),
+        "seller_rating_count": seller.rating_count if seller else 0,
         "seller_telegram_link": f"https://t.me/{seller.username}" if seller and seller.username else None,
         "is_favorite": is_favorite_product(db, current_user_id, product.id),
     }
@@ -456,8 +458,12 @@ def update_user_profile(user_id: int, data: schemas.UserProfileUpdate, db: Sessi
     user = db.query(models.User).filter(models.User.id == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="Користувача не знайдено")
+    ensure_not_banned(user)
     user.username = ensure_unique_username(db, data.username, exclude_user_id=user.id)
     user.full_name = normalize_text(data.full_name) if data.full_name else None
+    if data.avatar_url is not None:
+        cleaned_avatar = normalize_text(data.avatar_url)
+        user.avatar_url = cleaned_avatar or None
     if data.password:
         user.password_hash = hash_password(data.password)
     db.commit()
@@ -717,7 +723,10 @@ def delete_product(product_id: int, user_id: int = Query(...), db: Session = Dep
     db.query(models.Order).filter(
         models.Order.product_id == product.id,
         models.Order.status == "pending"
-    ).update({models.Order.status: "rejected"}, synchronize_session=False)
+    ).update({
+        models.Order.status: "rejected",
+        models.Order.seller_response_at: datetime.utcnow()
+    }, synchronize_session=False)
     db.commit()
     return {"message": "Оголошення перенесено в архів"}
 
@@ -884,6 +893,28 @@ def decide_order(order_id: int, data: schemas.OrderDecision, db: Session = Depen
     return {"message": "Запит підтверджено" if data.approve else "Запит відхилено"}
 
 
+@app.post("/orders/{order_id}/cancel")
+def cancel_order(order_id: int, data: schemas.OrderCancel, db: Session = Depends(get_db)):
+    order = db.query(models.Order).filter(models.Order.id == order_id).first()
+    if not order:
+        raise HTTPException(status_code=404, detail="Запит не знайдено")
+    if order.buyer_id != data.buyer_id:
+        raise HTTPException(status_code=403, detail="Це не ваш запит")
+    if order.status != "pending":
+        raise HTTPException(status_code=400, detail="Скасувати можна тільки запит, що очікує підтвердження")
+
+    order.status = "cancelled"
+    order.seller_response_at = datetime.utcnow()
+
+    db.query(models.CartItem).filter(
+        models.CartItem.user_id == order.buyer_id,
+        models.CartItem.product_id == order.product_id
+    ).delete(synchronize_session=False)
+
+    db.commit()
+    return {"message": "Запит на покупку скасовано", "order_id": order.id, "status": order.status}
+
+
 @app.post("/orders/{order_id}/review")
 def create_review(order_id: int, data: schemas.ReviewCreate, db: Session = Depends(get_db)):
     order = db.query(models.Order).filter(models.Order.id == order_id).first()
@@ -1045,7 +1076,10 @@ def admin_archive_product(product_id: int, current_admin_id: int = Query(...), d
     db.query(models.Order).filter(
         models.Order.product_id == product.id,
         models.Order.status == "pending"
-    ).update({models.Order.status: "rejected"}, synchronize_session=False)
+    ).update({
+        models.Order.status: "rejected",
+        models.Order.seller_response_at: datetime.utcnow()
+    }, synchronize_session=False)
     db.commit()
     log_admin_action(db, current_admin_id, f"archive product #{product.id}", "product", product.id)
     return {"message": "Оголошення перенесено в архів"}
