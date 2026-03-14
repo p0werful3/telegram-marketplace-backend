@@ -1,6 +1,5 @@
 from datetime import datetime
 from hashlib import sha256
-import os
 from urllib.parse import parse_qsl
 import json
 
@@ -32,9 +31,6 @@ app.add_middleware(
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 models.Base.metadata.create_all(bind=engine)
 ALLOWED_CURRENCIES = {"USD", "UAH", "EUR"}
-SUPERADMIN_USERNAME = os.getenv("SUPERADMIN_USERNAME", "powerfull_2").strip()
-SUPERADMIN_TELEGRAM_ID = os.getenv("SUPERADMIN_TELEGRAM_ID", "").strip()
-
 
 
 def run_safe_migrations() -> None:
@@ -42,7 +38,6 @@ def run_safe_migrations() -> None:
         "ALTER TABLE users ADD COLUMN IF NOT EXISTS password_hash VARCHAR",
         "ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_url VARCHAR",
         "ALTER TABLE users ADD COLUMN IF NOT EXISTS is_admin BOOLEAN DEFAULT FALSE",
-        "ALTER TABLE users ADD COLUMN IF NOT EXISTS is_superadmin BOOLEAN DEFAULT FALSE",
         "ALTER TABLE users ADD COLUMN IF NOT EXISTS is_banned BOOLEAN DEFAULT FALSE",
         "ALTER TABLE users ADD COLUMN IF NOT EXISTS rating_sum FLOAT DEFAULT 0",
         "ALTER TABLE users ADD COLUMN IF NOT EXISTS rating_count INTEGER DEFAULT 0",
@@ -71,7 +66,6 @@ def run_safe_migrations() -> None:
             conn.execute(text(query))
 
         conn.execute(text("UPDATE users SET is_admin=FALSE WHERE is_admin IS NULL"))
-        conn.execute(text("UPDATE users SET is_superadmin=FALSE WHERE is_superadmin IS NULL"))
         conn.execute(text("UPDATE users SET is_banned=FALSE WHERE is_banned IS NULL"))
         conn.execute(text("UPDATE users SET rating_sum=0 WHERE rating_sum IS NULL"))
         conn.execute(text("UPDATE users SET rating_count=0 WHERE rating_count IS NULL"))
@@ -86,16 +80,11 @@ def run_safe_migrations() -> None:
                     buyer_id INTEGER NOT NULL REFERENCES users(id),
                     rating INTEGER NOT NULL,
                     comment VARCHAR,
-                    deal_amount FLOAT,
-                    deal_currency VARCHAR,
                     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
                 )
                 """
             )
         )
-
-        conn.execute(text("ALTER TABLE reviews ADD COLUMN IF NOT EXISTS deal_amount FLOAT"))
-        conn.execute(text("ALTER TABLE reviews ADD COLUMN IF NOT EXISTS deal_currency VARCHAR"))
 
         conn.execute(
             text(
@@ -240,42 +229,10 @@ def ensure_not_banned(user: models.User | None) -> None:
         raise HTTPException(status_code=403, detail="Користувача заблоковано")
 
 
-def update_superadmin_flags(user: models.User | None) -> None:
-    if not user:
-        return
-    is_super = False
-    if SUPERADMIN_USERNAME and normalize_text(user.username) == normalize_text(SUPERADMIN_USERNAME):
-        is_super = True
-    if SUPERADMIN_TELEGRAM_ID and normalize_text(user.telegram_id) == normalize_text(SUPERADMIN_TELEGRAM_ID):
-        is_super = True
-    user.is_superadmin = is_super
-    if is_super:
-        user.is_admin = True
-
-
-def is_superadmin_user(user: models.User | None) -> bool:
-    return bool(user and getattr(user, "is_superadmin", False))
-
-
-def require_superadmin(db: Session, user_id: int) -> models.User:
-    user = require_admin(db, user_id)
-    if not is_superadmin_user(user):
-        raise HTTPException(status_code=403, detail="Доступно тільки суперадміну")
-    return user
-
-
-def protect_superadmin_target(actor: models.User, target: models.User, action_name: str) -> None:
-    if is_superadmin_user(target) and actor.id != target.id:
-        raise HTTPException(status_code=403, detail=f"Не можна {action_name} суперадміна")
-
-
 def require_admin(db: Session, user_id: int) -> models.User:
     user = db.query(models.User).filter(models.User.id == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="Адміністратора не знайдено")
-    update_superadmin_flags(user)
-    db.commit()
-    db.refresh(user)
     ensure_not_banned(user)
     if not user.is_admin:
         raise HTTPException(status_code=403, detail="Немає доступу до адмінки")
@@ -443,8 +400,6 @@ def register_user(user: schemas.UserCreate, db: Session = Depends(get_db)):
     )
     db.add(new_user)
     db.commit()
-    update_superadmin_flags(new_user)
-    db.commit()
     db.refresh(new_user)
     return new_user
 
@@ -455,9 +410,6 @@ def login_user(data: schemas.UserLogin, db: Session = Depends(get_db)):
     user = db.query(models.User).filter(models.User.username == username).first()
     if not user or not user.password_hash or not verify_password(data.password, user.password_hash):
         raise HTTPException(status_code=401, detail="Невірний username або password")
-    update_superadmin_flags(user)
-    db.commit()
-    db.refresh(user)
     ensure_not_banned(user)
     return user
 
@@ -502,23 +454,21 @@ def telegram_login(data: schemas.TelegramLogin, db: Session = Depends(get_db)):
 
     user = db.query(models.User).filter(models.User.telegram_id == telegram_id).first()
     if user:
+        ensure_not_banned(user)
         user.username = username
         user.full_name = full_name
-        update_superadmin_flags(user)
         db.commit()
         db.refresh(user)
-        ensure_not_banned(user)
         return user
 
     existing_username = db.query(models.User).filter(models.User.username == username).first()
     if existing_username:
+        ensure_not_banned(existing_username)
         existing_username.telegram_id = telegram_id
         if full_name:
             existing_username.full_name = full_name
-        update_superadmin_flags(existing_username)
         db.commit()
         db.refresh(existing_username)
-        ensure_not_banned(existing_username)
         return existing_username
 
     new_user = models.User(
@@ -529,8 +479,6 @@ def telegram_login(data: schemas.TelegramLogin, db: Session = Depends(get_db)):
     )
     db.add(new_user)
     db.commit()
-    update_superadmin_flags(new_user)
-    db.commit()
     db.refresh(new_user)
     return new_user
 
@@ -540,9 +488,6 @@ def get_user(user_id: int, db: Session = Depends(get_db)):
     user = db.query(models.User).filter(models.User.id == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="Користувача не знайдено")
-    update_superadmin_flags(user)
-    db.commit()
-    db.refresh(user)
     return user
 
 
@@ -551,10 +496,6 @@ def get_public_profile(user_id: int, db: Session = Depends(get_db)):
     user = db.query(models.User).filter(models.User.id == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="Користувача не знайдено")
-
-    update_superadmin_flags(user)
-    db.commit()
-    db.refresh(user)
 
     active_products = db.query(models.Product).filter(
         models.Product.seller_id == user.id,
@@ -577,7 +518,6 @@ def get_public_profile(user_id: int, db: Session = Depends(get_db)):
         "full_name": user.full_name,
         "avatar_url": user.avatar_url,
         "is_admin": user.is_admin,
-        "is_superadmin": user.is_superadmin,
         "rating": rating_value(user),
         "rating_count": user.rating_count or 0,
         "active_products": active_products,
@@ -598,20 +538,13 @@ def get_user_reviews(user_id: int, db: Session = Depends(get_db)):
     result = []
     for review in reviews:
         buyer = db.query(models.User).filter(models.User.id == review.buyer_id).first()
-        order = db.query(models.Order).filter(models.Order.id == review.order_id).first()
-        product = db.query(models.Product).filter(models.Product.id == order.product_id).first() if order else None
         result.append({
             "id": review.id,
             "rating": review.rating,
             "comment": review.comment,
             "created_at": review.created_at.isoformat() if review.created_at else None,
-            "buyer_id": review.buyer_id,
             "buyer_username": buyer.username if buyer else None,
             "buyer_full_name": buyer.full_name if buyer else None,
-            "deal_amount": review.deal_amount if review.deal_amount is not None else (order.offered_price if order and order.offered_price is not None else (product.price if product else None)),
-            "deal_currency": review.deal_currency or (order.currency if order else None) or (product.currency if product else "USD"),
-            "product_title": product.title if product else None,
-            "order_id": review.order_id,
         })
     return result
 
@@ -627,7 +560,6 @@ def update_user_profile(user_id: int, data: schemas.UserProfileUpdate, db: Sessi
         user.avatar_url = normalize_text(data.avatar_url) or None
     if data.password:
         user.password_hash = hash_password(data.password)
-    update_superadmin_flags(user)
     db.commit()
     db.refresh(user)
     return user
@@ -909,23 +841,6 @@ def delete_product(product_id: int, user_id: int = Query(...), db: Session = Dep
     return {"message": "Оголошення перенесено в архів"}
 
 
-@app.post("/products/{product_id}/restore")
-def restore_product(product_id: int, user_id: int = Query(...), db: Session = Depends(get_db)):
-    product = db.query(models.Product).filter(models.Product.id == product_id).first()
-    if not product:
-        raise HTTPException(status_code=404, detail="Товар не знайдено")
-    if product.seller_id != user_id:
-        raise HTTPException(status_code=403, detail="Це не ваше оголошення")
-    owner = db.query(models.User).filter(models.User.id == user_id).first()
-    ensure_not_banned(owner)
-    if product.status == "sold":
-        raise HTTPException(status_code=400, detail="Проданий товар не можна повернути в активні")
-    product.status = "active"
-    sync_product_activity(product)
-    db.commit()
-    return {"message": "Оголошення повернуто в продаж"}
-
-
 @app.post("/cart/add")
 def add_to_cart(data: schemas.CartAdd, db: Session = Depends(get_db)):
     user = db.query(models.User).filter(models.User.id == data.user_id).first()
@@ -1175,9 +1090,7 @@ def create_review(order_id: int, data: schemas.ReviewCreate, db: Session = Depen
         seller_id=order.seller_id,
         buyer_id=data.buyer_id,
         rating=data.rating,
-        comment=normalize_text(data.comment) or None,
-        deal_amount=order.offered_price,
-        deal_currency=order.currency or "USD",
+        comment=normalize_text(data.comment) or None
     )
     db.add(review)
 
@@ -1227,7 +1140,6 @@ def admin_list_users(current_admin_id: int = Query(...), q: str | None = Query(d
             "full_name": user.full_name,
             "avatar_url": user.avatar_url,
             "is_admin": user.is_admin,
-        "is_superadmin": user.is_superadmin,
             "is_banned": user.is_banned,
             "rating": rating_value(user),
             "rating_count": user.rating_count or 0,
@@ -1239,11 +1151,10 @@ def admin_list_users(current_admin_id: int = Query(...), q: str | None = Query(d
 
 @app.post("/admin/users/{user_id}/ban")
 def admin_ban_user(user_id: int, current_admin_id: int = Query(...), db: Session = Depends(get_db)):
-    admin = require_admin(db, current_admin_id)
+    require_admin(db, current_admin_id)
     user = db.query(models.User).filter(models.User.id == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="Користувача не знайдено")
-    protect_superadmin_target(admin, user, "заблокувати")
     if user.id == current_admin_id:
         raise HTTPException(status_code=400, detail="Не можна заблокувати самого себе")
     user.is_banned = True
@@ -1254,11 +1165,10 @@ def admin_ban_user(user_id: int, current_admin_id: int = Query(...), db: Session
 
 @app.post("/admin/users/{user_id}/unban")
 def admin_unban_user(user_id: int, current_admin_id: int = Query(...), db: Session = Depends(get_db)):
-    admin = require_admin(db, current_admin_id)
+    require_admin(db, current_admin_id)
     user = db.query(models.User).filter(models.User.id == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="Користувача не знайдено")
-    protect_superadmin_target(admin, user, "змінити статус")
     user.is_banned = False
     db.commit()
     log_admin_action(db, current_admin_id, f"unban @{user.username}", "user", user.id)
@@ -1267,12 +1177,11 @@ def admin_unban_user(user_id: int, current_admin_id: int = Query(...), db: Sessi
 
 @app.post("/admin/users/{user_id}/make-admin")
 def admin_make_admin(user_id: int, current_admin_id: int = Query(...), db: Session = Depends(get_db)):
-    require_superadmin(db, current_admin_id)
+    require_admin(db, current_admin_id)
     user = db.query(models.User).filter(models.User.id == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="Користувача не знайдено")
     user.is_admin = True
-    update_superadmin_flags(user)
     db.commit()
     log_admin_action(db, current_admin_id, f"make-admin @{user.username}", "user", user.id)
     return {"message": "Адміна додано"}
@@ -1280,15 +1189,13 @@ def admin_make_admin(user_id: int, current_admin_id: int = Query(...), db: Sessi
 
 @app.post("/admin/users/{user_id}/remove-admin")
 def admin_remove_admin(user_id: int, current_admin_id: int = Query(...), db: Session = Depends(get_db)):
-    admin = require_superadmin(db, current_admin_id)
+    require_admin(db, current_admin_id)
     user = db.query(models.User).filter(models.User.id == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="Користувача не знайдено")
-    protect_superadmin_target(admin, user, "зняти адмінку у")
     if user.id == current_admin_id:
         raise HTTPException(status_code=400, detail="Не можна забрати адмінку у самого себе")
     user.is_admin = False
-    update_superadmin_flags(user)
     db.commit()
     log_admin_action(db, current_admin_id, f"remove-admin @{user.username}", "user", user.id)
     return {"message": "Адміна прибрано"}
