@@ -39,6 +39,7 @@ class UserResponse(BaseModel):
     full_name: Optional[str] = None
     avatar_url: Optional[str] = None
     is_admin: bool = False
+    is_superadmin: bool = False
     is_banned: bool = False
     rating_sum: float = 0
     rating_count: int = 0
