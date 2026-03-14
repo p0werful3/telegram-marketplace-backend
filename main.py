@@ -1,5 +1,7 @@
 from datetime import datetime
 from hashlib import sha256
+from urllib.parse import parse_qsl
+import json
 
 from fastapi import FastAPI, Depends, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -39,7 +41,6 @@ def run_safe_migrations() -> None:
         "ALTER TABLE users ADD COLUMN IF NOT EXISTS is_banned BOOLEAN DEFAULT FALSE",
         "ALTER TABLE users ADD COLUMN IF NOT EXISTS rating_sum FLOAT DEFAULT 0",
         "ALTER TABLE users ADD COLUMN IF NOT EXISTS rating_count INTEGER DEFAULT 0",
-        "ALTER TABLE users ADD COLUMN IF NOT EXISTS created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()",
 
         "ALTER TABLE products ADD COLUMN IF NOT EXISTS image_url VARCHAR",
         "ALTER TABLE products ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT TRUE",
@@ -94,6 +95,37 @@ def run_safe_migrations() -> None:
                     action VARCHAR NOT NULL,
                     target_type VARCHAR,
                     target_id INTEGER,
+                    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+                )
+                """
+            )
+        )
+
+        conn.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS suggestions (
+                    id SERIAL PRIMARY KEY,
+                    user_id INTEGER NOT NULL REFERENCES users(id),
+                    title VARCHAR NOT NULL,
+                    message VARCHAR NOT NULL,
+                    status VARCHAR NOT NULL DEFAULT 'new',
+                    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+                )
+                """
+            )
+        )
+
+        conn.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS reports (
+                    id SERIAL PRIMARY KEY,
+                    reporter_id INTEGER NOT NULL REFERENCES users(id),
+                    listing_id INTEGER NOT NULL REFERENCES products(id),
+                    reason VARCHAR NOT NULL,
+                    comment VARCHAR,
+                    status VARCHAR NOT NULL DEFAULT 'new',
                     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
                 )
                 """
@@ -192,46 +224,6 @@ def seller_badge(sold_products: int, review_count: int) -> str:
     return "Новий продавець"
 
 
-def parse_telegram_login_payload(data: schemas.TelegramLogin) -> tuple[str | None, str | None, str | None]:
-    telegram_id = normalize_text(data.telegram_id) or None
-    username = normalize_text(data.username) or None
-    full_name = normalize_text(data.full_name) or None
-
-    if data.init_data:
-        from urllib.parse import parse_qs
-        import json
-
-        try:
-            parsed = parse_qs(data.init_data, keep_blank_values=True)
-            user_raw = parsed.get("user", [None])[0]
-            if user_raw:
-                user_data = json.loads(user_raw)
-                telegram_id = telegram_id or (str(user_data.get("id")) if user_data.get("id") else None)
-                username = username or normalize_text(user_data.get("username"))
-                if not full_name:
-                    first_name = normalize_text(user_data.get("first_name"))
-                    last_name = normalize_text(user_data.get("last_name"))
-                    combined = f"{first_name} {last_name}".strip()
-                    full_name = combined or None
-        except Exception:
-            pass
-
-    return telegram_id, username, full_name
-
-
-def serialize_review_item(db: Session, review: models.Review) -> dict:
-    buyer = db.query(models.User).filter(models.User.id == review.buyer_id).first()
-    return {
-        "id": review.id,
-        "rating": review.rating,
-        "comment": review.comment,
-        "created_at": review.created_at.isoformat() if review.created_at else None,
-        "buyer_id": review.buyer_id,
-        "buyer_username": buyer.username if buyer else None,
-        "buyer_full_name": buyer.full_name if buyer else None,
-    }
-
-
 def ensure_not_banned(user: models.User | None) -> None:
     if user and user.is_banned:
         raise HTTPException(status_code=403, detail="Користувача заблоковано")
@@ -321,6 +313,8 @@ def serialize_product(db: Session, product: models.Product, seller: models.User 
         "seller_username": seller.username if seller else None,
         "seller_name": seller.full_name if seller else None,
         "seller_telegram_link": f"https://t.me/{seller.username}" if seller and seller.username else None,
+        "seller_rating": rating_value(seller) if seller else 0,
+        "created_at": product.created_at.isoformat() if product.created_at else None,
         "is_favorite": is_favorite_product(db, current_user_id, product.id),
     }
 
@@ -420,13 +414,45 @@ def login_user(data: schemas.UserLogin, db: Session = Depends(get_db)):
     return user
 
 
+def parse_telegram_init_data(init_data: str | None) -> dict:
+    if not init_data:
+        return {}
+    try:
+        parsed = dict(parse_qsl(init_data, keep_blank_values=True))
+    except Exception:
+        return {}
+
+    user_raw = parsed.get("user")
+    if not user_raw:
+        return parsed
+
+    try:
+        user_obj = json.loads(user_raw)
+        if isinstance(user_obj, dict):
+            parsed["user_obj"] = user_obj
+    except Exception:
+        pass
+    return parsed
+
+
 @app.post("/auth/telegram", response_model=schemas.UserResponse)
 def telegram_login(data: schemas.TelegramLogin, db: Session = Depends(get_db)):
-    telegram_id, username, full_name = parse_telegram_login_payload(data)
-    if not username:
-        raise HTTPException(status_code=400, detail="У Telegram акаунта немає username")
+    parsed = parse_telegram_init_data(data.init_data)
+    parsed_user = parsed.get("user_obj") or {}
 
-    user = db.query(models.User).filter(models.User.telegram_id == telegram_id).first() if telegram_id else None
+    telegram_id = normalize_text(data.telegram_id) or normalize_text(str(parsed_user.get("id") or parsed.get("id") or ""))
+    if not telegram_id and data.username:
+        telegram_id = f"fallback_{normalize_text(data.username)}"
+    if not telegram_id:
+        raise HTTPException(status_code=400, detail="Не вдалося отримати Telegram ID")
+
+    username = normalize_text(data.username) or normalize_text(parsed_user.get("username"))
+    full_name = normalize_text(data.full_name) or normalize_text(f"{parsed_user.get('first_name', '')} {parsed_user.get('last_name', '')}") or None
+
+    if not username:
+        username = f"tg_{telegram_id}"
+
+    user = db.query(models.User).filter(models.User.telegram_id == telegram_id).first()
     if user:
         ensure_not_banned(user)
         user.username = username
@@ -438,8 +464,7 @@ def telegram_login(data: schemas.TelegramLogin, db: Session = Depends(get_db)):
     existing_username = db.query(models.User).filter(models.User.username == username).first()
     if existing_username:
         ensure_not_banned(existing_username)
-        if telegram_id:
-            existing_username.telegram_id = telegram_id
+        existing_username.telegram_id = telegram_id
         if full_name:
             existing_username.full_name = full_name
         db.commit()
@@ -495,13 +520,33 @@ def get_public_profile(user_id: int, db: Session = Depends(get_db)):
         "is_admin": user.is_admin,
         "rating": rating_value(user),
         "rating_count": user.rating_count or 0,
-        "seller_status": seller_badge(sold_products, user.rating_count or 0),
-        "registered_at": user.created_at.isoformat() if user.created_at else None,
         "active_products": active_products,
         "sold_products": sold_products,
         "archived_products": archived_products,
+        "seller_status": seller_badge(sold_products, user.rating_count or 0),
+        "registered_at": user.created_at.isoformat() if user.created_at else None,
         "telegram_link": f"https://t.me/{user.username}" if user.username else None,
     }
+
+
+@app.get("/users/{user_id}/reviews")
+def get_user_reviews(user_id: int, db: Session = Depends(get_db)):
+    user = db.query(models.User).filter(models.User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="Користувача не знайдено")
+    reviews = db.query(models.Review).filter(models.Review.seller_id == user_id).order_by(models.Review.id.desc()).all()
+    result = []
+    for review in reviews:
+        buyer = db.query(models.User).filter(models.User.id == review.buyer_id).first()
+        result.append({
+            "id": review.id,
+            "rating": review.rating,
+            "comment": review.comment,
+            "created_at": review.created_at.isoformat() if review.created_at else None,
+            "buyer_username": buyer.username if buyer else None,
+            "buyer_full_name": buyer.full_name if buyer else None,
+        })
+    return result
 
 
 @app.put("/users/{user_id}/profile", response_model=schemas.UserResponse)
@@ -511,6 +556,8 @@ def update_user_profile(user_id: int, data: schemas.UserProfileUpdate, db: Sessi
         raise HTTPException(status_code=404, detail="Користувача не знайдено")
     user.username = ensure_unique_username(db, data.username, exclude_user_id=user.id)
     user.full_name = normalize_text(data.full_name) if data.full_name else None
+    if data.avatar_url is not None:
+        user.avatar_url = normalize_text(data.avatar_url) or None
     if data.password:
         user.password_hash = hash_password(data.password)
     db.commit()
@@ -629,11 +676,13 @@ def get_products(
         query = query.order_by(models.Product.price.asc(), models.Product.id.desc())
     elif sort == "price_desc":
         query = query.order_by(models.Product.price.desc(), models.Product.id.desc())
+    elif sort == "oldest":
+        query = query.order_by(models.Product.id.asc())
     else:
         query = query.order_by(models.Product.id.desc())
 
     products = query.all()
-    return [
+    result = [
         serialize_product(
             db,
             product,
@@ -642,6 +691,9 @@ def get_products(
         )
         for product in products
     ]
+    if sort == "seller_rating":
+        result.sort(key=lambda item: (item.get("seller_rating") or 0, item.get("id") or 0), reverse=True)
+    return result
 
 
 @app.get("/products/{product_id}")
@@ -753,6 +805,20 @@ def get_purchase_history(user_id: int, db: Session = Depends(get_db)):
             "review_rating": review.rating if review else None,
         })
     return result
+
+
+@app.delete("/orders/{order_id}/cancel")
+def cancel_order(order_id: int, buyer_id: int = Query(...), db: Session = Depends(get_db)):
+    order = db.query(models.Order).filter(models.Order.id == order_id).first()
+    if not order:
+        raise HTTPException(status_code=404, detail="Запит не знайдено")
+    if order.buyer_id != buyer_id:
+        raise HTTPException(status_code=403, detail="Це не ваш запит")
+    if order.status != "pending":
+        raise HTTPException(status_code=400, detail="Скасувати можна тільки запит, який очікує підтвердження")
+    db.delete(order)
+    db.commit()
+    return {"message": "Запит скасовано"}
 
 
 @app.delete("/products/{product_id}")
@@ -887,6 +953,12 @@ def buy_product(data: schemas.OrderCreate, db: Session = Depends(get_db)):
     ))
     db.commit()
 
+    db.query(models.CartItem).filter(
+        models.CartItem.user_id == buyer.id,
+        models.CartItem.product_id == product.id
+    ).delete(synchronize_session=False)
+    db.commit()
+
     created_order = db.query(models.Order).filter(
         models.Order.product_id == product.id,
         models.Order.buyer_id == buyer.id
@@ -899,6 +971,66 @@ def buy_product(data: schemas.OrderCreate, db: Session = Depends(get_db)):
         "order_id": created_order.id if created_order else None,
         "status": "pending",
     }
+
+
+
+
+@app.post("/orders/buy-all")
+def buy_all_from_cart(user_id: int = Query(...), db: Session = Depends(get_db)):
+    buyer = db.query(models.User).filter(models.User.id == user_id).first()
+    if not buyer:
+        raise HTTPException(status_code=404, detail="Покупця не знайдено")
+    ensure_not_banned(buyer)
+
+    cart_items = db.query(models.CartItem).filter(models.CartItem.user_id == buyer.id).order_by(models.CartItem.id.asc()).all()
+    if not cart_items:
+        raise HTTPException(status_code=400, detail="Кошик порожній")
+
+    created = 0
+    skipped = []
+
+    for cart_item in cart_items:
+        product = db.query(models.Product).filter(models.Product.id == cart_item.product_id).first()
+        if not product or product.status != "active":
+            skipped.append({"product_id": cart_item.product_id, "reason": "not_active"})
+            continue
+        if product.seller_id == buyer.id:
+            skipped.append({"product_id": product.id, "reason": "own_product"})
+            continue
+
+        existing_pending = db.query(models.Order).filter(
+            models.Order.product_id == product.id,
+            models.Order.buyer_id == buyer.id,
+            models.Order.status == "pending"
+        ).first()
+        if existing_pending:
+            skipped.append({"product_id": product.id, "reason": "already_pending"})
+            continue
+
+        seller = db.query(models.User).filter(models.User.id == product.seller_id).first()
+        seller_username = seller.username if seller else None
+        seller_link = f"https://t.me/{seller_username}" if seller_username else None
+
+        db.add(models.Order(
+            buyer_id=buyer.id,
+            seller_id=product.seller_id,
+            product_id=product.id,
+            offered_price=product.price,
+            currency=product.currency or "USD",
+            buyer_username=buyer.username,
+            buyer_full_name=buyer.full_name,
+            seller_username=seller_username,
+            seller_link=seller_link,
+            status="pending",
+        ))
+        created += 1
+
+    db.commit()
+
+    db.query(models.CartItem).filter(models.CartItem.user_id == buyer.id).delete(synchronize_session=False)
+    db.commit()
+
+    return {"message": f"Оформлено запити: {created}", "created": created, "skipped": skipped}
 
 
 @app.post("/orders/{order_id}/decision")
@@ -971,33 +1103,6 @@ def create_review(order_id: int, data: schemas.ReviewCreate, db: Session = Depen
     return {"message": "Дякуємо за оцінку", "rating": data.rating}
 
 
-@app.get("/users/{user_id}/reviews")
-def get_user_reviews(user_id: int, db: Session = Depends(get_db)):
-    user = db.query(models.User).filter(models.User.id == user_id).first()
-    if not user:
-        raise HTTPException(status_code=404, detail="Користувача не знайдено")
-    reviews = db.query(models.Review).filter(models.Review.seller_id == user_id).order_by(models.Review.id.desc()).all()
-    return {
-        "rating": rating_value(user),
-        "rating_count": user.rating_count or 0,
-        "items": [serialize_review_item(db, review) for review in reviews]
-    }
-
-
-@app.get("/users/{user_id}/seller-badge")
-def get_user_seller_badge(user_id: int, db: Session = Depends(get_db)):
-    user = db.query(models.User).filter(models.User.id == user_id).first()
-    if not user:
-        raise HTTPException(status_code=404, detail="Користувача не знайдено")
-    sold_products = db.query(models.Product).filter(models.Product.seller_id == user_id, models.Product.status == "sold").count()
-    return {
-        "badge": seller_badge(sold_products, user.rating_count or 0),
-        "sold_products": sold_products,
-        "rating_count": user.rating_count or 0,
-        "registered_at": user.created_at.isoformat() if user.created_at else None
-    }
-
-
 @app.get("/admin/summary")
 def get_admin_summary(current_admin_id: int = Query(...), db: Session = Depends(get_db)):
     require_admin(db, current_admin_id)
@@ -1008,6 +1113,8 @@ def get_admin_summary(current_admin_id: int = Query(...), db: Session = Depends(
         "active_products": db.query(models.Product).filter(models.Product.status == "active").count(),
         "orders_pending": db.query(models.Order).filter(models.Order.status == "pending").count(),
         "admins": db.query(models.User).filter(models.User.is_admin == True).count(),
+        "suggestions_new": db.query(models.Suggestion).filter(models.Suggestion.status == "new").count(),
+        "reports_new": db.query(models.Report).filter(models.Report.status == "new").count(),
     }
 
 
@@ -1131,6 +1238,22 @@ def admin_archive_product(product_id: int, current_admin_id: int = Query(...), d
     return {"message": "Оголошення перенесено в архів"}
 
 
+
+@app.post("/admin/products/{product_id}/restore")
+def admin_restore_product(product_id: int, current_admin_id: int = Query(...), db: Session = Depends(get_db)):
+    require_admin(db, current_admin_id)
+    product = db.query(models.Product).filter(models.Product.id == product_id).first()
+    if not product:
+        raise HTTPException(status_code=404, detail="Товар не знайдено")
+    if product.status == "sold":
+        raise HTTPException(status_code=400, detail="Проданий товар не можна повернути в активні")
+    product.status = "active"
+    sync_product_activity(product)
+    db.commit()
+    log_admin_action(db, current_admin_id, f"restore product #{product.id}", "product", product.id)
+    return {"message": "Оголошення відновлено"}
+
+
 @app.delete("/admin/products/{product_id}")
 def admin_delete_product(product_id: int, current_admin_id: int = Query(...), db: Session = Depends(get_db)):
     require_admin(db, current_admin_id)
@@ -1164,6 +1287,120 @@ def admin_logs(current_admin_id: int = Query(...), db: Session = Depends(get_db)
             "admin_username": admin.username if admin else None,
         })
     return result
+
+
+
+@app.post("/suggestions")
+def create_suggestion(data: schemas.SuggestionCreate, db: Session = Depends(get_db)):
+    user = db.query(models.User).filter(models.User.id == data.user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="Користувача не знайдено")
+    ensure_not_banned(user)
+    title = normalize_text(data.title)
+    message = normalize_text(data.message)
+    if len(title) < 3:
+        raise HTTPException(status_code=400, detail="Вкажіть назву ідеї")
+    if len(message) < 5:
+        raise HTTPException(status_code=400, detail="Опишіть ідею детальніше")
+    item = models.Suggestion(user_id=user.id, title=title, message=message, status="new")
+    db.add(item)
+    db.commit()
+    return {"message": "Ідею надіслано"}
+
+
+@app.post("/reports")
+def create_report(data: schemas.ReportCreate, db: Session = Depends(get_db)):
+    user = db.query(models.User).filter(models.User.id == data.reporter_id).first()
+    product = db.query(models.Product).filter(models.Product.id == data.listing_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="Користувача не знайдено")
+    ensure_not_banned(user)
+    if not product:
+        raise HTTPException(status_code=404, detail="Оголошення не знайдено")
+    reason = normalize_text(data.reason)
+    allowed = {"Шахрайство", "Неправдивий опис", "Заборонений товар", "Спам", "Інше"}
+    if reason not in allowed:
+        raise HTTPException(status_code=400, detail="Некоректна причина")
+    comment = normalize_text(data.comment) or None
+    if reason == "Інше" and not comment:
+        raise HTTPException(status_code=400, detail="Опишіть причину скарги")
+    item = models.Report(reporter_id=user.id, listing_id=product.id, reason=reason, comment=comment, status="new")
+    db.add(item)
+    db.commit()
+    return {"message": "Скаргу надіслано"}
+
+
+@app.get("/admin/suggestions")
+def admin_list_suggestions(current_admin_id: int = Query(...), db: Session = Depends(get_db)):
+    require_admin(db, current_admin_id)
+    items = db.query(models.Suggestion).order_by(models.Suggestion.id.desc()).all()
+    result = []
+    for item in items:
+        user = db.query(models.User).filter(models.User.id == item.user_id).first()
+        result.append({
+            "id": item.id,
+            "title": item.title,
+            "message": item.message,
+            "status": item.status,
+            "created_at": item.created_at.isoformat() if item.created_at else None,
+            "user_id": item.user_id,
+            "username": user.username if user else None,
+        })
+    return result
+
+
+@app.post("/admin/suggestions/{suggestion_id}/status")
+def admin_update_suggestion_status(suggestion_id: int, data: schemas.SuggestionStatusUpdate, current_admin_id: int = Query(...), db: Session = Depends(get_db)):
+    require_admin(db, current_admin_id)
+    item = db.query(models.Suggestion).filter(models.Suggestion.id == suggestion_id).first()
+    if not item:
+        raise HTTPException(status_code=404, detail="Ідею не знайдено")
+    status = normalize_text(data.status).lower()
+    mapping = {"new": "new", "review": "review", "done": "done"}
+    if status not in mapping:
+        raise HTTPException(status_code=400, detail="Некоректний статус")
+    item.status = mapping[status]
+    db.commit()
+    log_admin_action(db, current_admin_id, f"suggestion-status {status} #{item.id}", "suggestion", item.id)
+    return {"message": "Статус ідеї оновлено"}
+
+
+@app.get("/admin/reports")
+def admin_list_reports(current_admin_id: int = Query(...), db: Session = Depends(get_db)):
+    require_admin(db, current_admin_id)
+    items = db.query(models.Report).order_by(models.Report.id.desc()).all()
+    result = []
+    for item in items:
+        user = db.query(models.User).filter(models.User.id == item.reporter_id).first()
+        product = db.query(models.Product).filter(models.Product.id == item.listing_id).first()
+        result.append({
+            "id": item.id,
+            "listing_id": item.listing_id,
+            "listing_title": product.title if product else f"Оголошення #{item.listing_id}",
+            "status": item.status,
+            "reason": item.reason,
+            "comment": item.comment,
+            "created_at": item.created_at.isoformat() if item.created_at else None,
+            "reporter_id": item.reporter_id,
+            "reporter_username": user.username if user else None,
+        })
+    return result
+
+
+@app.post("/admin/reports/{report_id}/status")
+def admin_update_report_status(report_id: int, data: schemas.ReportStatusUpdate, current_admin_id: int = Query(...), db: Session = Depends(get_db)):
+    require_admin(db, current_admin_id)
+    item = db.query(models.Report).filter(models.Report.id == report_id).first()
+    if not item:
+        raise HTTPException(status_code=404, detail="Скаргу не знайдено")
+    status = normalize_text(data.status).lower()
+    mapping = {"new": "new", "review": "review", "done": "done"}
+    if status not in mapping:
+        raise HTTPException(status_code=400, detail="Некоректний статус")
+    item.status = mapping[status]
+    db.commit()
+    log_admin_action(db, current_admin_id, f"report-status {status} #{item.id}", "report", item.id)
+    return {"message": "Статус скарги оновлено"}
 
 
 @app.post("/favorites")
