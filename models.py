@@ -14,6 +14,7 @@ class User(Base):
     password_hash = Column(String, nullable=True)
 
     is_admin = Column(Boolean, nullable=False, default=False, server_default="false")
+    is_superadmin = Column(Boolean, nullable=False, default=False, server_default="false")
     is_banned = Column(Boolean, nullable=False, default=False, server_default="false")
     rating_sum = Column(Float, nullable=False, default=0, server_default="0")
     rating_count = Column(Integer, nullable=False, default=0, server_default="0")
@@ -94,6 +95,8 @@ class Review(Base):
     buyer_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
     rating = Column(Integer, nullable=False)
     comment = Column(String, nullable=True)
+    deal_amount = Column(Float, nullable=True)
+    deal_currency = Column(String, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
 
