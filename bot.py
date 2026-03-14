@@ -16,8 +16,7 @@ keyboard = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="🛍 Відкрити маркетплейс", web_app=web_app)]
     ],
-    resize_keyboard=True,
-    input_field_placeholder="Натисніть кнопку нижче"
+    resize_keyboard=True
 )
 
 @dp.message(CommandStart())
@@ -29,19 +28,8 @@ async def start_handler(message: Message):
     )
 
 async def main():
-    print("Бот запущений...")
+    print("Bot started")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
     asyncio.run(main())
-
-
-
-
-
-
-
-
-
-
-
