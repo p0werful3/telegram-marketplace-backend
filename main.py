@@ -538,13 +538,23 @@ def get_user_reviews(user_id: int, db: Session = Depends(get_db)):
     result = []
     for review in reviews:
         buyer = db.query(models.User).filter(models.User.id == review.buyer_id).first()
+        order = db.query(models.Order).filter(models.Order.id == review.order_id).first()
+        product = db.query(models.Product).filter(models.Product.id == order.product_id).first() if order else None
         result.append({
             "id": review.id,
+            "order_id": review.order_id,
             "rating": review.rating,
             "comment": review.comment,
             "created_at": review.created_at.isoformat() if review.created_at else None,
+            "buyer_id": buyer.id if buyer else review.buyer_id,
             "buyer_username": buyer.username if buyer else None,
             "buyer_full_name": buyer.full_name if buyer else None,
+            "buyer_avatar_url": buyer.avatar_url if buyer else None,
+            "deal_amount": order.offered_price if order and order.offered_price is not None else (product.price if product else None),
+            "currency": (order.currency if order and order.currency else (product.currency if product else "USD")) or "USD",
+            "product_id": product.id if product else (order.product_id if order else None),
+            "product_title": product.title if product else (f"Товар #{order.product_id}" if order else None),
+            "product_image_url": product.image_url if product else None,
         })
     return result
 
@@ -839,6 +849,24 @@ def delete_product(product_id: int, user_id: int = Query(...), db: Session = Dep
     ).update({models.Order.status: "rejected"}, synchronize_session=False)
     db.commit()
     return {"message": "Оголошення перенесено в архів"}
+
+
+
+
+@app.post("/products/{product_id}/restore")
+def restore_product(product_id: int, user_id: int = Query(...), db: Session = Depends(get_db)):
+    product = db.query(models.Product).filter(models.Product.id == product_id).first()
+    if not product:
+        raise HTTPException(status_code=404, detail="Товар не знайдено")
+    if product.seller_id != user_id:
+        raise HTTPException(status_code=403, detail="Це не ваше оголошення")
+    if product.status != "archived":
+        raise HTTPException(status_code=400, detail="Оголошення не в архіві")
+
+    product.status = "active"
+    sync_product_activity(product)
+    db.commit()
+    return {"message": "Оголошення повернуто в каталог"}
 
 
 @app.post("/cart/add")
