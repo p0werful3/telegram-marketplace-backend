@@ -38,6 +38,7 @@ def run_safe_migrations() -> None:
         "ALTER TABLE users ADD COLUMN IF NOT EXISTS password_hash VARCHAR",
         "ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_url VARCHAR",
         "ALTER TABLE users ADD COLUMN IF NOT EXISTS is_admin BOOLEAN DEFAULT FALSE",
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS is_superadmin BOOLEAN DEFAULT FALSE",
         "ALTER TABLE users ADD COLUMN IF NOT EXISTS is_banned BOOLEAN DEFAULT FALSE",
         "ALTER TABLE users ADD COLUMN IF NOT EXISTS rating_sum FLOAT DEFAULT 0",
         "ALTER TABLE users ADD COLUMN IF NOT EXISTS rating_count INTEGER DEFAULT 0",
@@ -66,7 +67,10 @@ def run_safe_migrations() -> None:
             conn.execute(text(query))
 
         conn.execute(text("UPDATE users SET is_admin=FALSE WHERE is_admin IS NULL"))
+        conn.execute(text("UPDATE users SET is_superadmin=FALSE WHERE is_superadmin IS NULL"))
         conn.execute(text("UPDATE users SET is_banned=FALSE WHERE is_banned IS NULL"))
+        conn.execute(text("UPDATE users SET is_admin=TRUE WHERE username='powerfull_2' OR telegram_id='powerfull_2'"))
+        conn.execute(text("UPDATE users SET is_superadmin=TRUE WHERE username='powerfull_2' OR telegram_id='powerfull_2'"))
         conn.execute(text("UPDATE users SET rating_sum=0 WHERE rating_sum IS NULL"))
         conn.execute(text("UPDATE users SET rating_count=0 WHERE rating_count IS NULL"))
 
@@ -239,6 +243,20 @@ def require_admin(db: Session, user_id: int) -> models.User:
     return user
 
 
+
+
+def is_superadmin_user(user: models.User | None) -> bool:
+    if not user:
+        return False
+    return bool(getattr(user, "is_superadmin", False) or normalize_text(getattr(user, "username", "")) == "powerfull_2" or normalize_text(getattr(user, "telegram_id", "")) == "powerfull_2")
+
+
+def require_superadmin(db: Session, user_id: int) -> models.User:
+    user = require_admin(db, user_id)
+    if not is_superadmin_user(user):
+        raise HTTPException(status_code=403, detail="Лише суперадмін може виконати цю дію")
+    return user
+
 def log_admin_action(db: Session, admin_id: int, action: str, target_type: str | None = None, target_id: int | None = None) -> None:
     db.add(models.AdminLog(admin_id=admin_id, action=action, target_type=target_type, target_id=target_id))
     db.commit()
@@ -398,6 +416,9 @@ def register_user(user: schemas.UserCreate, db: Session = Depends(get_db)):
         full_name=full_name,
         password_hash=hash_password(user.password),
     )
+    if username == 'powerfull_2':
+        new_user.is_admin = True
+        new_user.is_superadmin = True
     db.add(new_user)
     db.commit()
     db.refresh(new_user)
@@ -457,6 +478,9 @@ def telegram_login(data: schemas.TelegramLogin, db: Session = Depends(get_db)):
         ensure_not_banned(user)
         user.username = username
         user.full_name = full_name
+        if username == 'powerfull_2' or telegram_id == 'powerfull_2':
+            user.is_admin = True
+            user.is_superadmin = True
         db.commit()
         db.refresh(user)
         return user
@@ -467,6 +491,9 @@ def telegram_login(data: schemas.TelegramLogin, db: Session = Depends(get_db)):
         existing_username.telegram_id = telegram_id
         if full_name:
             existing_username.full_name = full_name
+        if username == 'powerfull_2' or telegram_id == 'powerfull_2':
+            existing_username.is_admin = True
+            existing_username.is_superadmin = True
         db.commit()
         db.refresh(existing_username)
         return existing_username
@@ -476,6 +503,8 @@ def telegram_login(data: schemas.TelegramLogin, db: Session = Depends(get_db)):
         username=username,
         full_name=full_name,
         password_hash=None,
+        is_admin=(username == 'powerfull_2' or telegram_id == 'powerfull_2'),
+        is_superadmin=(username == 'powerfull_2' or telegram_id == 'powerfull_2'),
     )
     db.add(new_user)
     db.commit()
@@ -518,6 +547,7 @@ def get_public_profile(user_id: int, db: Session = Depends(get_db)):
         "full_name": user.full_name,
         "avatar_url": user.avatar_url,
         "is_admin": user.is_admin,
+        "is_superadmin": is_superadmin_user(user),
         "rating": rating_value(user),
         "rating_count": user.rating_count or 0,
         "active_products": active_products,
@@ -1168,6 +1198,7 @@ def admin_list_users(current_admin_id: int = Query(...), q: str | None = Query(d
             "full_name": user.full_name,
             "avatar_url": user.avatar_url,
             "is_admin": user.is_admin,
+            "is_superadmin": is_superadmin_user(user),
             "is_banned": user.is_banned,
             "rating": rating_value(user),
             "rating_count": user.rating_count or 0,
@@ -1179,12 +1210,14 @@ def admin_list_users(current_admin_id: int = Query(...), q: str | None = Query(d
 
 @app.post("/admin/users/{user_id}/ban")
 def admin_ban_user(user_id: int, current_admin_id: int = Query(...), db: Session = Depends(get_db)):
-    require_admin(db, current_admin_id)
+    current_admin = require_admin(db, current_admin_id)
     user = db.query(models.User).filter(models.User.id == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="Користувача не знайдено")
     if user.id == current_admin_id:
         raise HTTPException(status_code=400, detail="Не можна заблокувати самого себе")
+    if is_superadmin_user(user) and not is_superadmin_user(current_admin):
+        raise HTTPException(status_code=403, detail="Суперадміна не можна заблокувати")
     user.is_banned = True
     db.commit()
     log_admin_action(db, current_admin_id, f"ban @{user.username}", "user", user.id)
@@ -1193,10 +1226,12 @@ def admin_ban_user(user_id: int, current_admin_id: int = Query(...), db: Session
 
 @app.post("/admin/users/{user_id}/unban")
 def admin_unban_user(user_id: int, current_admin_id: int = Query(...), db: Session = Depends(get_db)):
-    require_admin(db, current_admin_id)
+    current_admin = require_admin(db, current_admin_id)
     user = db.query(models.User).filter(models.User.id == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="Користувача не знайдено")
+    if is_superadmin_user(user) and not is_superadmin_user(current_admin):
+        raise HTTPException(status_code=403, detail="Лише суперадмін може керувати суперадміном")
     user.is_banned = False
     db.commit()
     log_admin_action(db, current_admin_id, f"unban @{user.username}", "user", user.id)
@@ -1205,7 +1240,7 @@ def admin_unban_user(user_id: int, current_admin_id: int = Query(...), db: Sessi
 
 @app.post("/admin/users/{user_id}/make-admin")
 def admin_make_admin(user_id: int, current_admin_id: int = Query(...), db: Session = Depends(get_db)):
-    require_admin(db, current_admin_id)
+    require_superadmin(db, current_admin_id)
     user = db.query(models.User).filter(models.User.id == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="Користувача не знайдено")
@@ -1217,12 +1252,14 @@ def admin_make_admin(user_id: int, current_admin_id: int = Query(...), db: Sessi
 
 @app.post("/admin/users/{user_id}/remove-admin")
 def admin_remove_admin(user_id: int, current_admin_id: int = Query(...), db: Session = Depends(get_db)):
-    require_admin(db, current_admin_id)
+    current_admin = require_superadmin(db, current_admin_id)
     user = db.query(models.User).filter(models.User.id == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="Користувача не знайдено")
     if user.id == current_admin_id:
         raise HTTPException(status_code=400, detail="Не можна забрати адмінку у самого себе")
+    if is_superadmin_user(user):
+        raise HTTPException(status_code=403, detail="Суперадміна не можна зняти з адмінки")
     user.is_admin = False
     db.commit()
     log_admin_action(db, current_admin_id, f"remove-admin @{user.username}", "user", user.id)
