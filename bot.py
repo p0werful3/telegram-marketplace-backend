@@ -5,13 +5,13 @@ from aiogram.types import Message, KeyboardButton, ReplyKeyboardMarkup, WebAppIn
 from aiogram.filters import CommandStart
 from aiohttp import web
 
-TOKEN = "8648644673:AAE4-xVguaXoTSdaHkzGa3uL2bciuIc6wR8"
+TOKEN = os.environ.get("BOT_TOKEN", "8648644673:AAE4-xVguaXoTSdaHkzGa3uL2bciuIc6wR8")
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
 web_app = WebAppInfo(
-    url="https://p0werful3.github.io/telegram-marketplace-miniapp/?v=266"
+    url="https://p0werful3.github.io/telegram-marketplace-miniapp/?v=267"
 )
 
 keyboard = ReplyKeyboardMarkup(
