@@ -43,9 +43,14 @@ def send_telegram_message_by_user(user: models.User | None, message: str) -> Non
     if not token or not chat_id.isdigit():
         return
     try:
-        url = f"https://api.telegram.org/bot{token}/sendMessage?chat_id={quote(chat_id)}&text={quote(message)}"
-        req = Request(url, method="GET")
-        with urlopen(req, timeout=8) as resp:
+        payload = json.dumps({"chat_id": int(chat_id), "text": message}).encode("utf-8")
+        req = Request(
+            f"https://api.telegram.org/bot{token}/sendMessage",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urlopen(req, timeout=10) as resp:
             resp.read()
     except Exception:
         pass
@@ -356,6 +361,16 @@ def is_favorite_product(db: Session, user_id: int | None, product_id: int) -> bo
     return favorite is not None
 
 
+def is_in_cart_product(db: Session, user_id: int | None, product_id: int) -> bool:
+    if not user_id:
+        return False
+    cart_item = db.query(models.CartItem).filter(
+        models.CartItem.user_id == user_id,
+        models.CartItem.product_id == product_id,
+    ).first()
+    return cart_item is not None
+
+
 def serialize_product(db: Session, product: models.Product, seller: models.User | None, current_user_id: int | None = None):
     image_urls = get_product_images(db, product.id)
     fallback_first = product.image_url if product.image_url else (image_urls[0] if image_urls else None)
@@ -381,6 +396,7 @@ def serialize_product(db: Session, product: models.Product, seller: models.User 
         "seller_rating": rating_value(seller) if seller else 0,
         "created_at": product.created_at.isoformat() if product.created_at else None,
         "is_favorite": is_favorite_product(db, current_user_id, product.id),
+        "is_in_cart": is_in_cart_product(db, current_user_id, product.id),
     }
 
 
@@ -638,6 +654,73 @@ def get_public_profile(user_id: int, db: Session = Depends(get_db)):
     }
 
 
+@app.get("/users/{user_id}/products/public")
+def get_public_user_products(user_id: int, db: Session = Depends(get_db)):
+    user = db.query(models.User).filter(models.User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="Користувача не знайдено")
+
+    products = db.query(models.Product).filter(
+        models.Product.seller_id == user.id,
+        models.Product.status.in_(["active", "sold"])
+    ).order_by(models.Product.id.desc()).all()
+
+    return [serialize_product(db, product, user, None) for product in products]
+
+
+@app.get("/users/{user_id}/notifications")
+def get_user_notifications(user_id: int, db: Session = Depends(get_db)):
+    user = db.query(models.User).filter(models.User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="Користувача не знайдено")
+
+    result = []
+
+    incoming = db.query(models.Order).filter(
+        models.Order.seller_id == user_id,
+        models.Order.status == "pending"
+    ).order_by(models.Order.id.desc()).limit(20).all()
+
+    for order in incoming:
+        product = db.query(models.Product).filter(models.Product.id == order.product_id).first()
+        result.append({
+            "id": f"seller-{order.id}",
+            "type": "seller_pending",
+            "status": order.status,
+            "title": "Новий запит на покупку",
+            "message": f"Покупець {('@' + order.buyer_username) if order.buyer_username else ('ID ' + str(order.buyer_id))} надіслав запит на товар {product.title if product else ('#' + str(order.product_id))}",
+            "order_id": order.id,
+            "product_id": order.product_id,
+            "created_at": order.created_at.isoformat() if order.created_at else None,
+        })
+
+    buyer_updates = db.query(models.Order).filter(
+        models.Order.buyer_id == user_id,
+        models.Order.status.in_(["approved", "rejected", "completed"])
+    ).order_by(models.Order.id.desc()).limit(20).all()
+
+    status_titles = {
+        "approved": "Запит підтверджено",
+        "rejected": "Запит відхилено",
+        "completed": "Угоду завершено",
+    }
+    for order in buyer_updates:
+        product = db.query(models.Product).filter(models.Product.id == order.product_id).first()
+        result.append({
+            "id": f"buyer-{order.id}",
+            "type": "buyer_update",
+            "status": order.status,
+            "title": status_titles.get(order.status, "Оновлення угоди"),
+            "message": f"Товар: {product.title if product else ('#' + str(order.product_id))}",
+            "order_id": order.id,
+            "product_id": order.product_id,
+            "created_at": (order.seller_response_at or order.created_at).isoformat() if (order.seller_response_at or order.created_at) else None,
+        })
+
+    result.sort(key=lambda item: item.get("created_at") or "", reverse=True)
+    return result[:30]
+
+
 @app.get("/users/{user_id}/reviews")
 def get_user_reviews(user_id: int, db: Session = Depends(get_db)):
     user = db.query(models.User).filter(models.User.id == user_id).first()
@@ -777,11 +860,14 @@ def get_products(
     price_min: float | None = Query(default=None),
     price_max: float | None = Query(default=None),
     sort: str | None = Query(default="newest"),
+    seller_id: int | None = Query(default=None),
     current_user_id: int | None = Query(default=None),
     db: Session = Depends(get_db),
 ):
     query = db.query(models.Product).filter(models.Product.status == "active")
 
+    if seller_id is not None:
+        query = query.filter(models.Product.seller_id == seller_id)
     if q:
         q_clean = normalize_text(q)
         query = query.filter(
@@ -1142,7 +1228,7 @@ def buy_product(data: schemas.OrderCreate, db: Session = Depends(get_db)):
     ).order_by(models.Order.id.desc()).first()
 
     if seller:
-        send_telegram_message_by_user(seller, TEMP)
+        send_telegram_message_by_user(seller, f"🛒 У вас новий запит на покупку\nТовар: {product.title}\nЦіна: {product.price} {product.currency or 'USD'}\nПокупець: @{buyer.username if buyer.username else buyer.id}")
 
     return {
         "message": "Запит на покупку надіслано продавцю",
@@ -1204,7 +1290,7 @@ def buy_all_from_cart(user_id: int = Query(...), db: Session = Depends(get_db)):
             status="pending",
         ))
         if seller:
-            send_telegram_message_by_user(seller, TEMP)
+            send_telegram_message_by_user(seller, f"🛒 У вас новий запит на покупку\nТовар: {product.title}\nЦіна: {product.price} {product.currency or 'USD'}\nПокупець: @{buyer.username if buyer.username else buyer.id}")
         created += 1
 
     db.commit()
@@ -1336,6 +1422,8 @@ def get_admin_summary(current_admin_id: int = Query(...), db: Session = Depends(
 def admin_list_users(current_admin_id: int = Query(...), q: str | None = Query(default=None), db: Session = Depends(get_db)):
     require_admin(db, current_admin_id)
     query = db.query(models.User)
+    if seller_id is not None:
+        query = query.filter(models.Product.seller_id == seller_id)
     if q:
         q_clean = normalize_text(q)
         query = query.filter(
@@ -1426,6 +1514,8 @@ def admin_remove_admin(user_id: int, current_admin_id: int = Query(...), db: Ses
 def admin_list_products(current_admin_id: int = Query(...), q: str | None = Query(default=None), db: Session = Depends(get_db)):
     require_admin(db, current_admin_id)
     query = db.query(models.Product)
+    if seller_id is not None:
+        query = query.filter(models.Product.seller_id == seller_id)
     if q:
         q_clean = normalize_text(q)
         query = query.filter(
