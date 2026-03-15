@@ -5,7 +5,7 @@ from aiogram.types import Message, KeyboardButton, ReplyKeyboardMarkup, WebAppIn
 from aiogram.filters import CommandStart
 from aiohttp import web
 
-TOKEN = os.environ.get("BOT_TOKEN", "8648644673:AAE4-xVguaXoTSdaHkzGa3uL2bciuIc6wR8")
+TOKEN = "8648644673:AAE4-xVguaXoTSdaHkzGa3uL2bciuIc6wR8"
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
