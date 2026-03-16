@@ -9,7 +9,7 @@ from aiogram.filters import CommandStart
 from aiohttp import web
 
 TOKEN = os.getenv("BOT_TOKEN") or "8648644673:AAE4-xVguaXoTSdaHkzGa3uL2bciuIc6wR8"
-WEBAPP_URL = os.getenv("WEBAPP_URL") or "https://p0werful3.github.io/telegram-marketplace-miniapp/?v=278"
+WEBAPP_URL = os.getenv("WEBAPP_URL") or "https://p0werful3.github.io/telegram-marketplace-miniapp/?v=279"
 API_URL = os.getenv("API_URL") or "https://telegram-marketplace-api.onrender.com"
 
 bot = Bot(token=TOKEN)
