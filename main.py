@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from hashlib import sha256
 from urllib.parse import parse_qsl
 import json
@@ -674,16 +674,38 @@ def get_user_stats(user_id: int, db: Session = Depends(get_db)):
     user = db.query(models.User).filter(models.User.id == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="Користувача не знайдено")
+
+    seller_products = db.query(models.Product).filter(models.Product.seller_id == user_id).all()
+    seller_product_ids = [item.id for item in seller_products]
+
+    active_products = sum(1 for item in seller_products if item.status == "active")
+    sold_products = sum(1 for item in seller_products if item.status == "sold")
+    archived_products = sum(1 for item in seller_products if item.status == "archived")
+
+    pending_requests = db.query(models.Order).filter(
+        ((models.Order.seller_id == user_id) | (models.Order.product_id.in_(seller_product_ids) if seller_product_ids else text("FALSE"))),
+        models.Order.status == "pending"
+    ).count()
+
+    purchase_orders = db.query(models.Order).filter(models.Order.buyer_id == user_id).all()
+    purchase_history = len(purchase_orders)
+    purchase_pending = sum(1 for item in purchase_orders if item.status == "pending")
+
+    unread_notifications = db.query(models.Notification).filter(
+        models.Notification.user_id == user_id,
+        models.Notification.is_read == False
+    ).count()
+
     return {
-        "active_products": db.query(models.Product).filter(models.Product.seller_id == user_id, models.Product.status == "active").count(),
-        "sold_products": db.query(models.Product).filter(models.Product.seller_id == user_id, models.Product.status == "sold").count(),
-        "archived_products": db.query(models.Product).filter(models.Product.seller_id == user_id, models.Product.status == "archived").count(),
+        "active_products": active_products,
+        "sold_products": sold_products,
+        "archived_products": archived_products,
         "favorites": db.query(models.Favorite).filter(models.Favorite.user_id == user_id).count(),
         "cart_items": db.query(models.CartItem).filter(models.CartItem.user_id == user_id).count(),
-        "pending_requests": db.query(models.Order).filter(models.Order.seller_id == user_id, models.Order.status == "pending").count(),
-        "purchase_history": db.query(models.Order).filter(models.Order.buyer_id == user_id).count(),
-        "purchase_pending": db.query(models.Order).filter(models.Order.buyer_id == user_id, models.Order.status == "pending").count(),
-        "unread_notifications": db.query(models.Notification).filter(models.Notification.user_id == user_id, models.Notification.is_read == False).count(),
+        "pending_requests": pending_requests,
+        "purchase_history": purchase_history,
+        "purchase_pending": purchase_pending,
+        "unread_notifications": unread_notifications,
     }
 
 
@@ -692,18 +714,33 @@ def get_user_notifications(user_id: int, db: Session = Depends(get_db)):
     user = db.query(models.User).filter(models.User.id == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="Користувача не знайдено")
-    items = db.query(models.Notification).filter(models.Notification.user_id == user_id).order_by(models.Notification.id.desc()).limit(50).all()
-    unread = db.query(models.Notification).filter(models.Notification.user_id == user_id, models.Notification.is_read == False).count()
-    return {"unread_count": unread, "items": [{
-        "id": item.id,
-        "title": item.title,
-        "message": item.message,
-        "type": item.type,
-        "is_read": bool(item.is_read),
-        "related_order_id": item.related_order_id,
-        "related_product_id": item.related_product_id,
-        "created_at": item.created_at.isoformat() if item.created_at else None,
-    } for item in items]}
+
+    items = (
+        db.query(models.Notification)
+        .filter(models.Notification.user_id == user_id)
+        .order_by(models.Notification.created_at.desc(), models.Notification.id.desc())
+        .limit(50)
+        .all()
+    )
+    unread = db.query(models.Notification).filter(
+        models.Notification.user_id == user_id,
+        models.Notification.is_read == False
+    ).count()
+
+    result = []
+    for item in items:
+        result.append({
+            "id": item.id,
+            "title": item.title or "Повідомлення",
+            "message": item.message or "Нова подія",
+            "type": item.type or "info",
+            "is_read": bool(item.is_read),
+            "related_order_id": item.related_order_id,
+            "related_product_id": item.related_product_id,
+            "created_at": item.created_at.isoformat() if item.created_at else None,
+        })
+
+    return {"unread_count": unread, "items": result}
 
 
 @app.post("/users/{user_id}/notifications/read-all")
@@ -1174,7 +1211,7 @@ def buy_all_from_cart(user_id: int = Query(...), db: Session = Depends(get_db)):
         seller_username = seller.username if seller else None
         seller_link = f"https://t.me/{seller_username}" if seller_username else None
 
-        db.add(models.Order(
+        new_order = models.Order(
             buyer_id=buyer.id,
             seller_id=product.seller_id,
             product_id=product.id,
@@ -1185,10 +1222,22 @@ def buy_all_from_cart(user_id: int = Query(...), db: Session = Depends(get_db)):
             seller_username=seller_username,
             seller_link=seller_link,
             status="pending",
-        ))
-        created += 1
+        )
+        db.add(new_order)
+        db.flush()
 
-    db.commit()
+        if seller:
+            price_text = int(product.price) if float(product.price).is_integer() else product.price
+            create_notification(
+                db,
+                seller.id,
+                "Новий запит на покупку",
+                f"@{buyer.username or ('user' + str(buyer.id))} хоче купити «{product.title}» за {price_text} {product.currency or 'USD'}",
+                "order",
+                related_order_id=new_order.id,
+                related_product_id=product.id,
+            )
+        created += 1
 
     db.query(models.CartItem).filter(models.CartItem.user_id == buyer.id).delete(synchronize_session=False)
     db.commit()
@@ -1210,12 +1259,12 @@ def decide_order(order_id: int, data: schemas.OrderDecision, db: Session = Depen
 
     if not product or product.status != "active":
         order.status = "rejected"
-        order.seller_response_at = datetime.utcnow()
+        order.seller_response_at = datetime.now(timezone.utc)
         db.commit()
         return {"message": "Товар уже недоступний, запит прибрано"}
 
     order.status = "approved" if data.approve else "rejected"
-    order.seller_response_at = datetime.utcnow()
+    order.seller_response_at = datetime.now(timezone.utc)
 
     if data.approve:
         product.status = "sold"
@@ -1229,7 +1278,7 @@ def decide_order(order_id: int, data: schemas.OrderDecision, db: Session = Depen
         ).all()
         for other_order in other_pending_orders:
             other_order.status = "rejected"
-            other_order.seller_response_at = datetime.utcnow()
+            other_order.seller_response_at = datetime.now(timezone.utc)
             other_buyer = db.query(models.User).filter(models.User.id == other_order.buyer_id).first()
             if other_buyer:
                 create_notification(
