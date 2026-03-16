@@ -35,7 +35,7 @@ pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 models.Base.metadata.create_all(bind=engine)
 ALLOWED_CURRENCIES = {"USD", "UAH", "EUR"}
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "8648644673:AAE4-xVguaXoTSdaHkzGa3uL2bciuIc6wR8")
-WEBAPP_URL = os.getenv("WEBAPP_URL", "https://p0werful3.github.io/telegram-marketplace-minapp/?v=283")
+WEBAPP_URL = os.getenv("WEBAPP_URL", "https://p0werful3.github.io/telegram-marketplace-miniapp/?v=285")
 
 
 def run_safe_migrations() -> None:
@@ -54,8 +54,14 @@ def run_safe_migrations() -> None:
         "ALTER TABLE products ADD COLUMN IF NOT EXISTS city VARCHAR DEFAULT 'Київ'",
         "ALTER TABLE products ADD COLUMN IF NOT EXISTS status VARCHAR DEFAULT 'active'",
         "ALTER TABLE products ADD COLUMN IF NOT EXISTS currency VARCHAR DEFAULT 'USD'",
+        "ALTER TABLE products ADD COLUMN IF NOT EXISTS views_count INTEGER DEFAULT 0",
 
         "ALTER TABLE orders ADD COLUMN IF NOT EXISTS seller_username VARCHAR",
+        "ALTER TABLE notifications ADD COLUMN IF NOT EXISTS type VARCHAR DEFAULT 'info'",
+        "ALTER TABLE notifications ADD COLUMN IF NOT EXISTS is_read BOOLEAN DEFAULT FALSE",
+        "ALTER TABLE notifications ADD COLUMN IF NOT EXISTS related_order_id INTEGER",
+        "ALTER TABLE notifications ADD COLUMN IF NOT EXISTS related_product_id INTEGER",
+        "ALTER TABLE notifications ADD COLUMN IF NOT EXISTS created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()",
         "ALTER TABLE orders ADD COLUMN IF NOT EXISTS seller_link VARCHAR",
         "ALTER TABLE orders ADD COLUMN IF NOT EXISTS seller_id INTEGER",
         "ALTER TABLE orders ADD COLUMN IF NOT EXISTS offered_price FLOAT",
@@ -275,6 +281,7 @@ def send_telegram_message(telegram_id: str | None, text_message: str, button_tex
     payload = {
         "chat_id": str(telegram_id),
         "text": text_message,
+        "disable_web_page_preview": True,
         "reply_markup": {
             "inline_keyboard": [[{
                 "text": button_text,
@@ -416,6 +423,7 @@ def serialize_product(db: Session, product: models.Product, seller: models.User 
         "seller_telegram_link": f"https://t.me/{seller.username}" if seller and seller.username else None,
         "seller_rating": rating_value(seller) if seller else 0,
         "created_at": product.created_at.isoformat() if product.created_at else None,
+        "views_count": int(getattr(product, "views_count", 0) or 0),
         "is_favorite": is_favorite_product(db, current_user_id, product.id),
         "is_in_cart": is_product_in_cart(db, current_user_id, product.id),
     }
@@ -920,6 +928,10 @@ def get_product(product_id: int, current_user_id: int | None = Query(default=Non
     if not product:
         raise HTTPException(status_code=404, detail="Товар не знайдено")
     seller = db.query(models.User).filter(models.User.id == product.seller_id).first()
+    if product.status == "active" and (current_user_id is None or int(current_user_id) != int(product.seller_id)):
+        product.views_count = int(getattr(product, "views_count", 0) or 0) + 1
+        db.commit()
+        db.refresh(product)
     return serialize_product(db, product, seller, current_user_id)
 
 
