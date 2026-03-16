@@ -131,6 +131,7 @@ class Report(Base):
     status = Column(String, nullable=False, server_default="new")
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
+
 class Notification(Base):
     __tablename__ = "notifications"
 
@@ -138,9 +139,8 @@ class Notification(Base):
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
     title = Column(String, nullable=False)
     message = Column(String, nullable=False)
-    kind = Column(String, nullable=False, server_default="info")
-    order_id = Column(Integer, nullable=True, index=True)
-    product_id = Column(Integer, nullable=True, index=True)
+    type = Column(String, nullable=False, server_default="info")
     is_read = Column(Boolean, nullable=False, default=False, server_default="false")
+    related_order_id = Column(Integer, ForeignKey("orders.id"), nullable=True, index=True)
+    related_product_id = Column(Integer, ForeignKey("products.id"), nullable=True, index=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
-
