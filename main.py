@@ -432,6 +432,8 @@ def _serialize_simple_my_product(product: models.Product, db: Session):
         "image_url": product.image_url,
         "image_urls": get_product_images(db, product.id) or ([product.image_url] if product.image_url else []),
         "is_active": product.is_active,
+        "seller_id": product.seller_id,
+        "created_at": product.created_at.isoformat() if product.created_at else None,
     }
 
 
@@ -887,21 +889,24 @@ def get_purchase_requests(user_id: int, status: str = Query(default="pending"), 
     result = []
     for order in orders:
         product = db.query(models.Product).filter(models.Product.id == order.product_id).first()
-        if not product:
-            continue
+        seller = db.query(models.User).filter(models.User.id == order.seller_id).first() if order.seller_id else None
 
         result.append({
             "order_id": order.id,
             "status": order.status,
             "created_at": order.created_at.isoformat() if order.created_at else None,
-            "product_id": product.id,
-            "product_title": product.title,
-            "product_image_url": product.image_url,
-            "offered_price": order.offered_price if order.offered_price is not None else product.price,
-            "currency": order.currency or product.currency or "USD",
+            "seller_response_at": order.seller_response_at.isoformat() if order.seller_response_at else None,
+            "product_id": order.product_id,
+            "product_title": product.title if product else f"Товар #{order.product_id}",
+            "product_image_url": product.image_url if product else None,
+            "product_status": product.status if product else None,
+            "offered_price": order.offered_price if order.offered_price is not None else (product.price if product else None),
+            "currency": order.currency or (product.currency if product else "USD") or "USD",
             "buyer_id": order.buyer_id,
             "buyer_username": order.buyer_username,
             "buyer_full_name": order.buyer_full_name,
+            "seller_id": order.seller_id,
+            "seller_username": seller.username if seller else order.seller_username,
         })
     return result
 
@@ -1217,11 +1222,25 @@ def decide_order(order_id: int, data: schemas.OrderDecision, db: Session = Depen
         sync_product_activity(product)
         db.query(models.CartItem).filter(models.CartItem.product_id == product.id).delete()
         db.query(models.Favorite).filter(models.Favorite.product_id == product.id).delete()
-        db.query(models.Order).filter(
+        other_pending_orders = db.query(models.Order).filter(
             models.Order.product_id == product.id,
             models.Order.id != order.id,
             models.Order.status == "pending"
-        ).update({models.Order.status: "rejected"}, synchronize_session=False)
+        ).all()
+        for other_order in other_pending_orders:
+            other_order.status = "rejected"
+            other_order.seller_response_at = datetime.utcnow()
+            other_buyer = db.query(models.User).filter(models.User.id == other_order.buyer_id).first()
+            if other_buyer:
+                create_notification(
+                    db,
+                    other_buyer.id,
+                    "Товар уже продано",
+                    f"Товар «{product.title}» вже купив інший покупець",
+                    "order",
+                    related_order_id=other_order.id,
+                    related_product_id=product.id,
+                )
 
     buyer = db.query(models.User).filter(models.User.id == order.buyer_id).first()
     if buyer and product:
