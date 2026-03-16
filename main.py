@@ -2,9 +2,8 @@ from datetime import datetime
 from hashlib import sha256
 from urllib.parse import parse_qsl
 from urllib.request import Request, urlopen
-from urllib.error import URLError, HTTPError
-import os
 import json
+import os
 
 from fastapi import FastAPI, Depends, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -126,6 +125,24 @@ def run_safe_migrations() -> None:
         conn.execute(
             text(
                 """
+                CREATE TABLE IF NOT EXISTS notifications (
+                    id SERIAL PRIMARY KEY,
+                    user_id INTEGER NOT NULL REFERENCES users(id),
+                    title VARCHAR NOT NULL,
+                    message VARCHAR NOT NULL,
+                    kind VARCHAR NOT NULL DEFAULT 'info',
+                    order_id INTEGER,
+                    product_id INTEGER,
+                    is_read BOOLEAN NOT NULL DEFAULT FALSE,
+                    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+                )
+                """
+            )
+        )
+
+        conn.execute(
+            text(
+                """
                 CREATE TABLE IF NOT EXISTS reports (
                     id SERIAL PRIMARY KEY,
                     reporter_id INTEGER NOT NULL REFERENCES users(id),
@@ -229,6 +246,36 @@ def seller_badge(sold_products: int, review_count: int) -> str:
     if sold_products >= 3 and review_count >= 3:
         return "Надійний продавець"
     return "Новий продавець"
+
+
+def create_notification(db: Session, user_id: int, title: str, message: str, kind: str = "info", order_id: int | None = None, product_id: int | None = None) -> None:
+    db.add(models.Notification(user_id=user_id, title=title[:120], message=message[:1000], kind=kind or "info", order_id=order_id, product_id=product_id, is_read=False))
+
+
+def send_telegram_message(chat_id: str | None, text_value: str) -> None:
+    token = os.getenv("BOT_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN")
+    if not token or not chat_id:
+        return
+    try:
+        payload = json.dumps({"chat_id": str(chat_id), "text": text_value}).encode("utf-8")
+        req = Request(f"https://api.telegram.org/bot{token}/sendMessage", data=payload, headers={"Content-Type": "application/json"}, method="POST")
+        with urlopen(req, timeout=10) as response:
+            response.read()
+    except Exception:
+        pass
+
+
+def notify_user(db: Session, user: models.User | None, title: str, message: str, kind: str = "info", order_id: int | None = None, product_id: int | None = None) -> None:
+    if not user:
+        return
+    create_notification(db, user.id, title, message, kind=kind, order_id=order_id, product_id=product_id)
+    telegram_id = normalize_text(getattr(user, "telegram_id", ""))
+    if telegram_id and not telegram_id.startswith("fallback_"):
+        send_telegram_message(telegram_id, f"{title}\n\n{message}")
+
+
+def serialize_notification(item: models.Notification) -> dict:
+    return {"id": item.id, "title": item.title, "message": item.message, "kind": item.kind, "order_id": item.order_id, "product_id": item.product_id, "is_read": bool(item.is_read), "created_at": item.created_at.isoformat() if item.created_at else None}
 
 
 def ensure_not_banned(user: models.User | None) -> None:
@@ -400,26 +447,6 @@ def _serialize_simple_my_product(product: models.Product, db: Session):
     }
 
 
-def send_telegram_message_if_possible(user: models.User | None, text_message: str) -> None:
-    if not user or not user.telegram_id or not text_message:
-        return
-    token = os.getenv("BOT_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN")
-    if not token:
-        return
-    try:
-        payload = json.dumps({"chat_id": str(user.telegram_id), "text": text_message}).encode("utf-8")
-        req = Request(
-            f"https://api.telegram.org/bot{token}/sendMessage",
-            data=payload,
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        with urlopen(req, timeout=10) as resp:
-            resp.read()
-    except (URLError, HTTPError, Exception):
-        pass
-
-
 @app.get("/")
 def root():
     return {"message": "Telegram Marketplace API працює"}
@@ -536,25 +563,25 @@ def telegram_login(data: schemas.TelegramLogin, db: Session = Depends(get_db)):
     return new_user
 
 
+@app.get("/users/search")
+def search_user_by_username(username: str = Query(...), db: Session = Depends(get_db)):
+    username_value = normalize_text(username).lstrip("@")
+    if not username_value:
+        raise HTTPException(status_code=400, detail="Вкажіть username")
+    user = db.query(models.User).filter(models.User.username.ilike(username_value)).first()
+    if not user:
+        user = db.query(models.User).filter(models.User.username.ilike(f"%{username_value}%")).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="Продавця не знайдено")
+    return get_public_profile(user.id, db)
+
+
 @app.get("/users/{user_id}", response_model=schemas.UserResponse)
 def get_user(user_id: int, db: Session = Depends(get_db)):
     user = db.query(models.User).filter(models.User.id == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="Користувача не знайдено")
     return user
-
-
-@app.get("/users/search")
-def search_user(username: str = Query(...), db: Session = Depends(get_db)):
-    clean = normalize_text(username).replace("@", "")
-    if not clean:
-        raise HTTPException(status_code=400, detail="Username порожній")
-    user = db.query(models.User).filter(models.User.username.ilike(clean)).first()
-    if not user:
-        user = db.query(models.User).filter(models.User.username.ilike(f"%{clean}%")).order_by(models.User.id.desc()).first()
-    if not user:
-        raise HTTPException(status_code=404, detail="Користувача не знайдено")
-    return {"id": user.id, "username": user.username, "full_name": user.full_name, "avatar_url": user.avatar_url}
 
 
 @app.get("/users/{user_id}/public-profile")
@@ -577,6 +604,9 @@ def get_public_profile(user_id: int, db: Session = Depends(get_db)):
         models.Product.seller_id == user.id,
         models.Product.status == "archived"
     ).count()
+    bought_products = db.query(models.Order).filter(models.Order.buyer_id == user.id, models.Order.status.in_(["approved", "completed"])).count()
+    active_listing_objects = db.query(models.Product).filter(models.Product.seller_id == user.id, models.Product.status == "active").order_by(models.Product.id.desc()).limit(12).all()
+    active_listings = [serialize_product(db, product, user, None) for product in active_listing_objects]
 
     return {
         "id": user.id,
@@ -590,6 +620,8 @@ def get_public_profile(user_id: int, db: Session = Depends(get_db)):
         "active_products": active_products,
         "sold_products": sold_products,
         "archived_products": archived_products,
+        "bought_products": bought_products,
+        "active_listings": active_listings,
         "seller_status": seller_badge(sold_products, user.rating_count or 0),
         "registered_at": user.created_at.isoformat() if user.created_at else None,
         "telegram_link": f"https://t.me/{user.username}" if user.username else None,
@@ -647,32 +679,27 @@ def get_user_notifications(user_id: int, db: Session = Depends(get_db)):
     user = db.query(models.User).filter(models.User.id == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="Користувача не знайдено")
+    items = db.query(models.Notification).filter(models.Notification.user_id == user_id).order_by(models.Notification.id.desc()).limit(50).all()
+    return {"items": [serialize_notification(item) for item in items], "unread": sum(0 if item.is_read else 1 for item in items)}
 
-    items = []
-    seller_pending = db.query(models.Order).filter(models.Order.seller_id == user_id, models.Order.status == "pending").order_by(models.Order.id.desc()).limit(20).all()
-    for order in seller_pending:
-        product = db.query(models.Product).filter(models.Product.id == order.product_id).first()
-        items.append({
-            "id": f"seller-pending-{order.id}",
-            "type": "order_pending",
-            "text": f"Новий запит на покупку: {(product.title if product else f'Товар #{order.product_id}')}",
-            "created_at": order.created_at.isoformat() if order.created_at else None,
-        })
 
-    buyer_updates = db.query(models.Order).filter(models.Order.buyer_id == user_id, models.Order.status.in_(["approved", "rejected"]))
-    buyer_updates = buyer_updates.order_by(models.Order.id.desc()).limit(20).all()
-    for order in buyer_updates:
-        product = db.query(models.Product).filter(models.Product.id == order.product_id).first()
-        txt = "Запит підтверджено" if order.status == "approved" else "Запит відхилено"
-        items.append({
-            "id": f"buyer-{order.id}",
-            "type": order.status,
-            "text": f"{txt}: {(product.title if product else f'Товар #{order.product_id}')}",
-            "created_at": (order.seller_response_at or order.created_at).isoformat() if (order.seller_response_at or order.created_at) else None,
-        })
+@app.get("/users/{user_id}/notifications/unread-count")
+def get_notifications_unread_count(user_id: int, db: Session = Depends(get_db)):
+    user = db.query(models.User).filter(models.User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="Користувача не знайдено")
+    unread = db.query(models.Notification).filter(models.Notification.user_id == user_id, models.Notification.is_read == False).count()
+    return {"unread": unread}
 
-    items.sort(key=lambda x: x.get("created_at") or "", reverse=True)
-    return items[:20]
+
+@app.post("/users/{user_id}/notifications/read-all")
+def read_all_notifications(user_id: int, db: Session = Depends(get_db)):
+    user = db.query(models.User).filter(models.User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="Користувача не знайдено")
+    db.query(models.Notification).filter(models.Notification.user_id == user_id, models.Notification.is_read == False).update({models.Notification.is_read: True}, synchronize_session=False)
+    db.commit()
+    return {"message": "ok"}
 
 
 @app.get("/users/{user_id}/stats")
@@ -689,6 +716,7 @@ def get_user_stats(user_id: int, db: Session = Depends(get_db)):
         "pending_requests": db.query(models.Order).filter(models.Order.seller_id == user_id, models.Order.status == "pending").count(),
         "purchase_history": db.query(models.Order).filter(models.Order.buyer_id == user_id).count(),
         "purchase_pending": db.query(models.Order).filter(models.Order.buyer_id == user_id, models.Order.status == "pending").count(),
+        "notifications_unread": db.query(models.Notification).filter(models.Notification.user_id == user_id, models.Notification.is_read == False).count(),
     }
 
 
@@ -911,7 +939,7 @@ def get_purchase_history(user_id: int, db: Session = Depends(get_db)):
             "seller_id": order.seller_id,
             "seller_username": seller.username if seller else order.seller_username,
             "seller_full_name": seller.full_name if seller else None,
-            "can_review": order.status == "approved" and review is None,
+            "can_review": order.status in ["approved", "completed"] and review is None,
             "review_rating": review.rating if review else None,
         })
     return result
@@ -1067,7 +1095,7 @@ def buy_product(data: schemas.OrderCreate, db: Session = Depends(get_db)):
     seller_username = seller.username if seller else None
     seller_link = f"https://t.me/{seller_username}" if seller_username else None
 
-    db.add(models.Order(
+    new_order = models.Order(
         buyer_id=buyer.id,
         seller_id=product.seller_id,
         product_id=product.id,
@@ -1078,7 +1106,11 @@ def buy_product(data: schemas.OrderCreate, db: Session = Depends(get_db)):
         seller_username=seller_username,
         seller_link=seller_link,
         status="pending",
-    ))
+    )
+    db.add(new_order)
+    db.flush()
+    if seller:
+        notify_user(db, seller, "Новий запит на покупку", f"Товар: {product.title}\nПокупець: @{buyer.username if buyer.username else buyer.id}", kind="order", order_id=new_order.id, product_id=product.id)
     db.commit()
 
     db.query(models.CartItem).filter(
@@ -1091,11 +1123,6 @@ def buy_product(data: schemas.OrderCreate, db: Session = Depends(get_db)):
         models.Order.product_id == product.id,
         models.Order.buyer_id == buyer.id
     ).order_by(models.Order.id.desc()).first()
-
-    send_telegram_message_if_possible(
-        seller,
-        f"У вас новий запит на покупку\n{product.title}\n{format(product.price, '.0f') if float(product.price).is_integer() else product.price}{product.currency or 'USD'}\nПокупець: @{buyer.username}"
-    )
 
     return {
         "message": "Запит на покупку надіслано продавцю",
@@ -1187,6 +1214,8 @@ def decide_order(order_id: int, data: schemas.OrderDecision, db: Session = Depen
     order.status = "approved" if data.approve else "rejected"
     order.seller_response_at = datetime.utcnow()
 
+    buyer = db.query(models.User).filter(models.User.id == order.buyer_id).first()
+
     if data.approve:
         product.status = "sold"
         sync_product_activity(product)
@@ -1197,14 +1226,31 @@ def decide_order(order_id: int, data: schemas.OrderDecision, db: Session = Depen
             models.Order.id != order.id,
             models.Order.status == "pending"
         ).update({models.Order.status: "rejected"}, synchronize_session=False)
+        if buyer:
+            notify_user(db, buyer, "Запит підтверджено", f"Продавець підтвердив покупку товару: {product.title}", kind="order", order_id=order.id, product_id=product.id)
+    else:
+        if buyer:
+            notify_user(db, buyer, "Запит відхилено", f"Продавець відхилив покупку товару: {product.title}", kind="order", order_id=order.id, product_id=product.id)
 
     db.commit()
-    buyer = db.query(models.User).filter(models.User.id == order.buyer_id).first()
-    if data.approve:
-        send_telegram_message_if_possible(buyer, f"Ваш запит підтверджено\n{product.title if product else 'Товар'}")
-    else:
-        send_telegram_message_if_possible(buyer, f"Ваш запит відхилено\n{product.title if product else 'Товар'}")
     return {"message": "Запит підтверджено" if data.approve else "Запит відхилено"}
+
+
+@app.post("/orders/{order_id}/complete")
+def complete_order(order_id: int, buyer_id: int = Query(...), db: Session = Depends(get_db)):
+    order = db.query(models.Order).filter(models.Order.id == order_id).first()
+    if not order:
+        raise HTTPException(status_code=404, detail="Замовлення не знайдено")
+    if order.buyer_id != buyer_id:
+        raise HTTPException(status_code=403, detail="Це не ваша покупка")
+    if order.status != "approved":
+        raise HTTPException(status_code=400, detail="Угоду можна завершити тільки після підтвердження продавцем")
+    order.status = "completed"
+    product = db.query(models.Product).filter(models.Product.id == order.product_id).first()
+    seller = db.query(models.User).filter(models.User.id == order.seller_id).first() if order.seller_id else None
+    notify_user(db, seller, "Угоду завершено", f"Покупець підтвердив отримання товару: {product.title if product else order.product_id}", kind="order", order_id=order.id, product_id=order.product_id)
+    db.commit()
+    return {"message": "Угоду завершено", "status": "completed"}
 
 
 @app.post("/orders/{order_id}/review")
@@ -1214,7 +1260,7 @@ def create_review(order_id: int, data: schemas.ReviewCreate, db: Session = Depen
         raise HTTPException(status_code=404, detail="Замовлення не знайдено")
     if order.buyer_id != data.buyer_id:
         raise HTTPException(status_code=403, detail="Це не ваше замовлення")
-    if order.status != "approved":
+    if order.status not in ["approved", "completed"]:
         raise HTTPException(status_code=400, detail="Оцінити можна тільки підтверджену покупку")
 
     existing_review = db.query(models.Review).filter(models.Review.order_id == order.id).first()
