@@ -1,9 +1,7 @@
 from datetime import datetime
 from hashlib import sha256
 from urllib.parse import parse_qsl
-from urllib.request import Request, urlopen
 import json
-import os
 
 from fastapi import FastAPI, Depends, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -32,53 +30,7 @@ app.add_middleware(
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 models.Base.metadata.create_all(bind=engine)
-
 ALLOWED_CURRENCIES = {"USD", "UAH", "EUR"}
-BOT_TOKEN = os.getenv("BOT_TOKEN") or "8648644673:AAE4-xVguaXoTSdaHkzGa3uL2bciuIc6wR8"
-WEBAPP_URL = os.getenv("WEBAPP_URL") or "https://p0werful3.github.io/telegram-marketplace-miniapp/?v=278"
-
-
-def is_real_telegram_id(value: str | None) -> bool:
-    clean = normalize_text(value) if 'normalize_text' in globals() else str(value or '').strip()
-    return bool(clean) and clean.isdigit()
-
-
-def send_telegram_message(chat_id: str | None, text_message: str) -> bool:
-    chat_id = normalize_text(chat_id)
-    if not is_real_telegram_id(chat_id) or not BOT_TOKEN:
-        return False
-    payload = json.dumps({
-        "chat_id": chat_id,
-        "text": text_message[:3500],
-        "disable_web_page_preview": True,
-    }).encode("utf-8")
-    try:
-        request = Request(
-            f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
-            data=payload,
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        with urlopen(request, timeout=8) as response:
-            return 200 <= getattr(response, 'status', 200) < 300
-    except Exception as error:
-        print(f"Telegram send error: {error}")
-        return False
-
-
-def send_telegram_notification(user: models.User | None, text_message: str) -> bool:
-    if not user or not is_real_telegram_id(getattr(user, "telegram_id", None)):
-        return False
-    return send_telegram_message(user.telegram_id, text_message)
-
-
-def create_user_notification(db: Session, user: models.User | None, title: str, message: str, type_: str = "info", related_order_id: int | None = None, related_product_id: int | None = None, telegram_text: str | None = None) -> None:
-    if not user:
-        return
-    create_notification(db, user.id, title, message, type_, related_order_id, related_product_id)
-    if telegram_text:
-        send_telegram_notification(user, telegram_text)
-
 
 
 def run_safe_migrations() -> None:
@@ -97,6 +49,7 @@ def run_safe_migrations() -> None:
         "ALTER TABLE products ADD COLUMN IF NOT EXISTS city VARCHAR DEFAULT 'Київ'",
         "ALTER TABLE products ADD COLUMN IF NOT EXISTS status VARCHAR DEFAULT 'active'",
         "ALTER TABLE products ADD COLUMN IF NOT EXISTS currency VARCHAR DEFAULT 'USD'",
+        "ALTER TABLE products ADD COLUMN IF NOT EXISTS views_count INTEGER DEFAULT 0",
 
         "ALTER TABLE orders ADD COLUMN IF NOT EXISTS seller_username VARCHAR",
         "ALTER TABLE orders ADD COLUMN IF NOT EXISTS seller_link VARCHAR",
@@ -108,12 +61,6 @@ def run_safe_migrations() -> None:
         "ALTER TABLE orders ADD COLUMN IF NOT EXISTS status VARCHAR DEFAULT 'pending'",
         "ALTER TABLE orders ADD COLUMN IF NOT EXISTS created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()",
         "ALTER TABLE orders ADD COLUMN IF NOT EXISTS seller_response_at TIMESTAMP WITH TIME ZONE",
-
-        "ALTER TABLE notifications ADD COLUMN IF NOT EXISTS type VARCHAR DEFAULT 'info'",
-        "ALTER TABLE notifications ADD COLUMN IF NOT EXISTS is_read BOOLEAN DEFAULT FALSE",
-        "ALTER TABLE notifications ADD COLUMN IF NOT EXISTS related_order_id INTEGER",
-        "ALTER TABLE notifications ADD COLUMN IF NOT EXISTS related_product_id INTEGER",
-        "ALTER TABLE notifications ADD COLUMN IF NOT EXISTS created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()",
     ]
 
     with engine.begin() as conn:
@@ -419,6 +366,7 @@ def serialize_product(db: Session, product: models.Product, seller: models.User 
         "image_url": fallback_first,
         "image_urls": image_urls,
         "is_active": product.is_active,
+        "views_count": int(getattr(product, "views_count", 0) or 0),
         "seller_id": product.seller_id,
         "seller_username": seller.username if seller else None,
         "seller_name": seller.full_name if seller else None,
@@ -486,6 +434,7 @@ def _serialize_simple_my_product(product: models.Product, db: Session):
         "image_url": product.image_url,
         "image_urls": get_product_images(db, product.id) or ([product.image_url] if product.image_url else []),
         "is_active": product.is_active,
+        "views_count": int(getattr(product, "views_count", 0) or 0),
     }
 
 
@@ -887,6 +836,10 @@ def get_product(product_id: int, current_user_id: int | None = Query(default=Non
     product = db.query(models.Product).filter(models.Product.id == product_id).first()
     if not product:
         raise HTTPException(status_code=404, detail="Товар не знайдено")
+    if product.status == "active" and (current_user_id is None or int(current_user_id) != int(product.seller_id)):
+        product.views_count = int(getattr(product, "views_count", 0) or 0) + 1
+        db.commit()
+        db.refresh(product)
     seller = db.query(models.User).filter(models.User.id == product.seller_id).first()
     return serialize_product(db, product, seller, current_user_id)
 
@@ -1002,20 +955,6 @@ def cancel_order(order_id: int, buyer_id: int = Query(...), db: Session = Depend
         raise HTTPException(status_code=403, detail="Це не ваш запит")
     if order.status != "pending":
         raise HTTPException(status_code=400, detail="Скасувати можна тільки запит, який очікує підтвердження")
-    seller = db.query(models.User).filter(models.User.id == order.seller_id).first() if order.seller_id else None
-    product = db.query(models.Product).filter(models.Product.id == order.product_id).first()
-    if seller and product:
-        buyer = db.query(models.User).filter(models.User.id == order.buyer_id).first()
-        create_user_notification(
-            db,
-            seller,
-            "Запит на покупку скасовано",
-            f"Покупець @{buyer.username if buyer and buyer.username else 'user' + str(buyer_id)} скасував запит на «{product.title}»",
-            "order",
-            related_order_id=order.id,
-            related_product_id=product.id,
-            telegram_text=f"↩️ Запит на покупку скасовано\n\nТовар: {product.title}\nПокупець скасував свій запит.",
-        )
     db.delete(order)
     db.commit()
     return {"message": "Запит скасовано"}
@@ -1175,21 +1114,14 @@ def buy_product(data: schemas.OrderCreate, db: Session = Depends(get_db)):
 
     if seller:
         price_text = int(product.price) if float(product.price).is_integer() else product.price
-        create_user_notification(
+        create_notification(
             db,
-            seller,
+            seller.id,
             "Новий запит на покупку",
             f"@{buyer.username or ('user' + str(buyer.id))} хоче купити «{product.title}» за {price_text} {product.currency or 'USD'}",
             "order",
             related_order_id=new_order.id,
             related_product_id=product.id,
-            telegram_text=(
-                f"📦 Новий запит на покупку\n\n"
-                f"Товар: {product.title}\n"
-                f"Ціна: {price_text} {product.currency or 'USD'}\n"
-                f"Покупець: @{buyer.username if buyer.username else 'user' + str(buyer.id)}\n\n"
-                f"Відкрий маркетплейс у боті, щоб підтвердити або відхилити запит.\n{WEBAPP_URL}"
-            ),
         )
         db.commit()
 
@@ -1244,7 +1176,7 @@ def buy_all_from_cart(user_id: int = Query(...), db: Session = Depends(get_db)):
         seller_username = seller.username if seller else None
         seller_link = f"https://t.me/{seller_username}" if seller_username else None
 
-        new_order = models.Order(
+        db.add(models.Order(
             buyer_id=buyer.id,
             seller_id=product.seller_id,
             product_id=product.id,
@@ -1255,27 +1187,7 @@ def buy_all_from_cart(user_id: int = Query(...), db: Session = Depends(get_db)):
             seller_username=seller_username,
             seller_link=seller_link,
             status="pending",
-        )
-        db.add(new_order)
-        db.flush()
-        if seller:
-            price_text = int(product.price) if float(product.price).is_integer() else product.price
-            create_user_notification(
-                db,
-                seller,
-                "Новий запит на покупку",
-                f"@{buyer.username or ('user' + str(buyer.id))} хоче купити «{product.title}» за {price_text} {product.currency or 'USD'}",
-                "order",
-                related_order_id=new_order.id,
-                related_product_id=product.id,
-                telegram_text=(
-                    f"📦 Новий запит на покупку\n\n"
-                    f"Товар: {product.title}\n"
-                    f"Ціна: {price_text} {product.currency or 'USD'}\n"
-                    f"Покупець: @{buyer.username if buyer.username else 'user' + str(buyer.id)}\n\n"
-                    f"Відкрий маркетплейс у боті, щоб підтвердити або відхилити запит.\n{WEBAPP_URL}"
-                ),
-            )
+        ))
         created += 1
 
     db.commit()
@@ -1301,68 +1213,34 @@ def decide_order(order_id: int, data: schemas.OrderDecision, db: Session = Depen
     if not product or product.status != "active":
         order.status = "rejected"
         order.seller_response_at = datetime.utcnow()
-        buyer = db.query(models.User).filter(models.User.id == order.buyer_id).first()
-        create_user_notification(
-            db,
-            buyer,
-            "Запит закрито",
-            "Товар уже недоступний, тому запит автоматично закрито",
-            "order",
-            related_order_id=order.id,
-            related_product_id=order.product_id,
-            telegram_text=f"ℹ️ Запит закрито\n\nТовар уже недоступний, тому ваш запит було закрито.\n{WEBAPP_URL}",
-        )
         db.commit()
         return {"message": "Товар уже недоступний, запит прибрано"}
 
     order.status = "approved" if data.approve else "rejected"
     order.seller_response_at = datetime.utcnow()
 
-    seller = db.query(models.User).filter(models.User.id == order.seller_id).first() if order.seller_id else None
-    other_pending_orders = []
     if data.approve:
         product.status = "sold"
         sync_product_activity(product)
         db.query(models.CartItem).filter(models.CartItem.product_id == product.id).delete()
         db.query(models.Favorite).filter(models.Favorite.product_id == product.id).delete()
-        other_pending_orders = db.query(models.Order).filter(
+        db.query(models.Order).filter(
             models.Order.product_id == product.id,
             models.Order.id != order.id,
             models.Order.status == "pending"
-        ).all()
-        for pending_order in other_pending_orders:
-            pending_order.status = "rejected"
-            pending_order.seller_response_at = datetime.utcnow()
+        ).update({models.Order.status: "rejected"}, synchronize_session=False)
 
     buyer = db.query(models.User).filter(models.User.id == order.buyer_id).first()
     if buyer and product:
-        create_user_notification(
+        create_notification(
             db,
-            buyer,
+            buyer.id,
             "Статус запиту оновлено",
             (f"Продавець підтвердив продаж товару «{product.title}»" if data.approve else f"Продавець відхилив запит на «{product.title}»"),
             "order",
             related_order_id=order.id,
             related_product_id=product.id,
-            telegram_text=(
-                f"✅ Ваш запит підтверджено\n\nТовар: {product.title}\nПродавець: @{seller.username if seller and seller.username else 'seller'}\n\n"
-                f"Домовтесь із продавцем про деталі в маркетплейсі." if data.approve else
-                f"❌ Ваш запит відхилено\n\nТовар: {product.title}\n\nСпробуйте обрати інший товар у маркетплейсі.\n{WEBAPP_URL}"
-            ),
         )
-    if data.approve and product:
-        for rejected_order in other_pending_orders:
-            rejected_buyer = db.query(models.User).filter(models.User.id == rejected_order.buyer_id).first()
-            create_user_notification(
-                db,
-                rejected_buyer,
-                "Товар уже продано",
-                f"На жаль, товар «{product.title}» продано іншому покупцю",
-                "order",
-                related_order_id=rejected_order.id,
-                related_product_id=product.id,
-                telegram_text=f"ℹ️ Товар уже продано\n\n{product.title} вже продали іншому покупцю. Подивіться інші оголошення в маркетплейсі.\n{WEBAPP_URL}",
-            )
     db.commit()
     return {"message": "Запит підтверджено" if data.approve else "Запит відхилено"}
 
