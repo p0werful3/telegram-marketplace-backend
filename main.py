@@ -35,7 +35,7 @@ pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 models.Base.metadata.create_all(bind=engine)
 ALLOWED_CURRENCIES = {"USD", "UAH", "EUR"}
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "8648644673:AAE4-xVguaXoTSdaHkzGa3uL2bciuIc6wR8")
-WEBAPP_URL = os.getenv("WEBAPP_URL", "https://p0werful3.github.io/telegram-marketplace-miniapp/?v=307")
+WEBAPP_URL = os.getenv("WEBAPP_URL", "https://p0werful3.github.io/telegram-marketplace-miniapp/?v=308")
 
 
 def run_safe_migrations() -> None:
@@ -96,6 +96,20 @@ def run_safe_migrations() -> None:
                     rating INTEGER NOT NULL,
                     comment VARCHAR,
                     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+                )
+                """
+            )
+        )
+
+        conn.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS product_views (
+                    id SERIAL PRIMARY KEY,
+                    user_id INTEGER NOT NULL REFERENCES users(id),
+                    product_id INTEGER NOT NULL REFERENCES products(id),
+                    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                    UNIQUE(user_id, product_id)
                 )
                 """
             )
@@ -665,7 +679,7 @@ def get_user(user_id: int, db: Session = Depends(get_db)):
 
 
 @app.get("/users/{user_id}/public-profile")
-def get_public_profile(user_id: int, db: Session = Depends(get_db)):
+def get_public_profile(user_id: int, current_user_id: int | None = Query(default=None), db: Session = Depends(get_db)):
     user = db.query(models.User).filter(models.User.id == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="Користувача не знайдено")
@@ -708,7 +722,7 @@ def get_public_profile(user_id: int, db: Session = Depends(get_db)):
         "sold_products": sold_products,
         "archived_products": archived_products,
         "bought_products": bought_products,
-        "listings": [serialize_product(db, item, user, None) for item in active_listing_items],
+        "listings": [serialize_product(db, item, user, current_user_id) for item in active_listing_items],
         "seller_status": seller_badge(sold_products, user.rating_count or 0),
         "registered_at": user.created_at.isoformat() if user.created_at else None,
         "telegram_link": f"https://t.me/{user.username}" if user.username else None,
@@ -928,10 +942,23 @@ def get_product(product_id: int, current_user_id: int | None = Query(default=Non
     if not product:
         raise HTTPException(status_code=404, detail="Товар не знайдено")
     seller = db.query(models.User).filter(models.User.id == product.seller_id).first()
+
     if product.status == "active" and (current_user_id is None or int(current_user_id) != int(product.seller_id)):
-        product.views_count = int(getattr(product, "views_count", 0) or 0) + 1
-        db.commit()
-        db.refresh(product)
+        should_increment = True
+        if current_user_id is not None:
+            existing_view = db.query(models.ProductView).filter(
+                models.ProductView.user_id == int(current_user_id),
+                models.ProductView.product_id == product.id
+            ).first()
+            if existing_view:
+                should_increment = False
+            else:
+                db.add(models.ProductView(user_id=int(current_user_id), product_id=product.id))
+        if should_increment:
+            product.views_count = int(getattr(product, "views_count", 0) or 0) + 1
+            db.commit()
+            db.refresh(product)
+
     return serialize_product(db, product, seller, current_user_id)
 
 
