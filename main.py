@@ -486,6 +486,16 @@ def validate_and_prepare_product_payload(payload: schemas.ProductCreate | schema
 
 
 def _serialize_simple_my_product(product: models.Product, db: Session):
+    image_urls = get_product_images(db, product.id) or ([product.image_url] if product.image_url else [])
+    latest_pending_order = db.query(models.Order).filter(
+        models.Order.product_id == product.id,
+        models.Order.status == "pending"
+    ).order_by(models.Order.id.desc()).first()
+    approved_order = db.query(models.Order).filter(
+        models.Order.product_id == product.id,
+        models.Order.status == "approved"
+    ).order_by(models.Order.id.desc()).first()
+
     return {
         "id": product.id,
         "title": product.title,
@@ -497,8 +507,31 @@ def _serialize_simple_my_product(product: models.Product, db: Session):
         "city": product.city,
         "status": product.status,
         "image_url": product.image_url,
-        "image_urls": get_product_images(db, product.id) or ([product.image_url] if product.image_url else []),
+        "image_urls": image_urls,
         "is_active": product.is_active,
+        "created_at": product.created_at.isoformat() if product.created_at else None,
+        "pending_requests_count": db.query(models.Order).filter(
+            models.Order.product_id == product.id,
+            models.Order.status == "pending"
+        ).count(),
+        "latest_request": {
+            "order_id": latest_pending_order.id,
+            "created_at": latest_pending_order.created_at.isoformat() if latest_pending_order and latest_pending_order.created_at else None,
+            "buyer_id": latest_pending_order.buyer_id if latest_pending_order else None,
+            "buyer_username": latest_pending_order.buyer_username if latest_pending_order else None,
+            "buyer_full_name": latest_pending_order.buyer_full_name if latest_pending_order else None,
+            "offered_price": latest_pending_order.offered_price if latest_pending_order else None,
+            "currency": latest_pending_order.currency if latest_pending_order else None,
+        } if latest_pending_order else None,
+        "sale_info": {
+            "order_id": approved_order.id,
+            "sold_at": approved_order.seller_response_at.isoformat() if approved_order and approved_order.seller_response_at else None,
+            "buyer_id": approved_order.buyer_id if approved_order else None,
+            "buyer_username": approved_order.buyer_username if approved_order else None,
+            "buyer_full_name": approved_order.buyer_full_name if approved_order else None,
+            "offered_price": approved_order.offered_price if approved_order else None,
+            "currency": approved_order.currency if approved_order else None,
+        } if approved_order else None,
     }
 
 
