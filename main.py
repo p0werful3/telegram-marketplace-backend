@@ -35,7 +35,7 @@ pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 models.Base.metadata.create_all(bind=engine)
 ALLOWED_CURRENCIES = {"USD", "UAH", "EUR"}
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "8648644673:AAE4-xVguaXoTSdaHkzGa3uL2bciuIc6wR8")
-WEBAPP_URL = os.getenv("WEBAPP_URL", "https://p0werful3.github.io/telegram-marketplace-miniapp/?v=309")
+WEBAPP_URL = os.getenv("WEBAPP_URL", "https://p0werful3.github.io/telegram-marketplace-miniapp/?v=310")
 
 
 def run_safe_migrations() -> None:
