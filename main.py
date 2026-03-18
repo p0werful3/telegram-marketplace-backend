@@ -35,7 +35,7 @@ pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 models.Base.metadata.create_all(bind=engine)
 ALLOWED_CURRENCIES = {"USD", "UAH", "EUR"}
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "8648644673:AAE4-xVguaXoTSdaHkzGa3uL2bciuIc6wR8")
-WEBAPP_URL = os.getenv("WEBAPP_URL", "https://p0werful3.github.io/telegram-marketplace-miniapp/?v=310")
+WEBAPP_URL = os.getenv("WEBAPP_URL", "https://p0werful3.github.io/telegram-marketplace-miniapp/?v=311")
 
 
 def run_safe_migrations() -> None:
@@ -485,7 +485,14 @@ def validate_and_prepare_product_payload(payload: schemas.ProductCreate | schema
     }
 
 
-def _serialize_simple_my_product(product: models.Product, db: Session):
+def _serialize_simple_my_product(product: models.Product, db: Session, order: models.Order | None = None):
+    approved_order = order
+    if approved_order is None and product.status == "sold":
+        approved_order = db.query(models.Order).filter(
+            models.Order.product_id == product.id,
+            models.Order.status == "approved"
+        ).order_by(models.Order.seller_response_at.desc().nullslast(), models.Order.id.desc()).first()
+
     return {
         "id": product.id,
         "title": product.title,
@@ -499,6 +506,12 @@ def _serialize_simple_my_product(product: models.Product, db: Session):
         "image_url": product.image_url,
         "image_urls": get_product_images(db, product.id) or ([product.image_url] if product.image_url else []),
         "is_active": product.is_active,
+        "created_at": product.created_at.isoformat() if product.created_at else None,
+        "buyer_id": approved_order.buyer_id if approved_order else None,
+        "buyer_username": approved_order.buyer_username if approved_order else None,
+        "buyer_full_name": approved_order.buyer_full_name if approved_order else None,
+        "sold_at": approved_order.seller_response_at.isoformat() if approved_order and approved_order.seller_response_at else None,
+        "buyer_confirmed_at": approved_order.seller_response_at.isoformat() if approved_order and approved_order.seller_response_at else None,
     }
 
 
@@ -983,7 +996,12 @@ def get_my_sold_products(user_id: int, db: Session = Depends(get_db)):
         models.Product.seller_id == user.id,
         models.Product.status == "sold"
     ).order_by(models.Product.id.desc()).all()
-    return [_serialize_simple_my_product(product, db) for product in products]
+    approved_orders = db.query(models.Order).filter(
+        models.Order.seller_id == user.id,
+        models.Order.status == "approved"
+    ).order_by(models.Order.seller_response_at.desc().nullslast(), models.Order.id.desc()).all()
+    order_map = {order.product_id: order for order in approved_orders}
+    return [_serialize_simple_my_product(product, db, order_map.get(product.id)) for product in products]
 
 
 @app.get("/users/{user_id}/products/archived")
