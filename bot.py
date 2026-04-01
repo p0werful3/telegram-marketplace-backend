@@ -7,7 +7,7 @@ from aiohttp import web, ClientSession
 
 TOKEN = os.getenv("BOT_TOKEN", "8648644673:AAE4-xVguaXoTSdaHkzGa3uL2bciuIc6wR8")
 API_URL = os.getenv("API_URL", "https://telegram-marketplace-api.onrender.com")
-WEBAPP_URL = os.getenv("WEBAPP_URL", "https://p0werful3.github.io/telegram-marketplace-miniapp/?v=324")
+WEBAPP_URL = os.getenv("WEBAPP_URL", "https://p0werful3.github.io/telegram-marketplace-miniapp/?v=331")
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
