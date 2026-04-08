@@ -2,10 +2,12 @@ import os
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, declarative_base
 
-DATABASE_URL = os.getenv("DATABASE_URL")
+DEFAULT_DATABASE_URL = (
+    "postgresql://postgres.bljxabptfvkcbeusjezu:0625qwerasdfzxc"
+    "@aws-1-eu-west-1.pooler.supabase.com:5432/postgres?sslmode=require"
+)
 
-if not DATABASE_URL:
-    raise ValueError("DATABASE_URL не задана")
+DATABASE_URL = os.getenv("DATABASE_URL", DEFAULT_DATABASE_URL)
 
 if DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
