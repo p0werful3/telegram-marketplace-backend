@@ -1,156 +1,117 @@
-from sqlalchemy import Column, Integer, String, ForeignKey, DateTime, Float, Boolean
-from sqlalchemy.sql import func
-from database import Base
+from datetime import datetime
+from typing import Optional, List
+from pydantic import BaseModel, Field
 
 
-class User(Base):
-    __tablename__ = "users"
-
-    id = Column(Integer, primary_key=True, index=True)
-    telegram_id = Column(String, unique=True, nullable=True, index=True)
-    username = Column(String, unique=True, nullable=False, index=True)
-    full_name = Column(String, nullable=True)
-    avatar_url = Column(String, nullable=True)
-    password_hash = Column(String, nullable=True)
-
-    is_admin = Column(Boolean, nullable=False, default=False, server_default="false")
-    is_superadmin = Column(Boolean, nullable=False, default=False, server_default="false")
-    is_banned = Column(Boolean, nullable=False, default=False, server_default="false")
-    rating_sum = Column(Float, nullable=False, default=0, server_default="0")
-    rating_count = Column(Integer, nullable=False, default=0, server_default="0")
-
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
+class UserBase(BaseModel):
+    username: str
+    full_name: Optional[str] = None
+    telegram_id: Optional[str] = None
 
 
-class Product(Base):
-    __tablename__ = "products"
-
-    id = Column(Integer, primary_key=True, index=True)
-    seller_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
-    title = Column(String, nullable=False)
-    description = Column(String, nullable=False)
-    price = Column(Float, nullable=False)
-    currency = Column(String, nullable=False, server_default="USD")
-    category = Column(String, nullable=False)
-    condition = Column(String, nullable=False, server_default="Новий")
-    city = Column(String, nullable=False, server_default="Київ")
-    status = Column(String, nullable=False, server_default="active")
-    image_url = Column(String, nullable=True)
-    is_active = Column(Boolean, nullable=False, default=True, server_default="true")
-    views_count = Column(Integer, nullable=False, default=0, server_default="0")
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
+class UserCreate(UserBase):
+    password: str
 
 
-class ProductImage(Base):
-    __tablename__ = "product_images"
-
-    id = Column(Integer, primary_key=True, index=True)
-    product_id = Column(Integer, ForeignKey("products.id"), nullable=False, index=True)
-    image_url = Column(String, nullable=False)
-    sort_order = Column(Integer, nullable=False, default=0, server_default="0")
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
+class UserLogin(BaseModel):
+    username: str
+    password: str
 
 
-class CartItem(Base):
-    __tablename__ = "cart_items"
-
-    id = Column(Integer, primary_key=True, index=True)
-    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
-    product_id = Column(Integer, ForeignKey("products.id"), nullable=False, index=True)
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
+class TelegramLogin(BaseModel):
+    telegram_id: Optional[str] = None
+    username: Optional[str] = None
+    full_name: Optional[str] = None
+    init_data: Optional[str] = None
 
 
-class Order(Base):
-    __tablename__ = "orders"
-
-    id = Column(Integer, primary_key=True, index=True)
-    buyer_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
-    seller_id = Column(Integer, ForeignKey("users.id"), nullable=True, index=True)
-    product_id = Column(Integer, ForeignKey("products.id"), nullable=False, index=True)
-    offered_price = Column(Float, nullable=True)
-    currency = Column(String, nullable=False, server_default="USD")
-    buyer_username = Column(String, nullable=True)
-    buyer_full_name = Column(String, nullable=True)
-    seller_username = Column(String, nullable=True)
-    seller_link = Column(String, nullable=True)
-    status = Column(String, nullable=False, server_default="pending")
-    seller_response_at = Column(DateTime(timezone=True), nullable=True)
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
+class UserProfileUpdate(BaseModel):
+    username: str
+    full_name: Optional[str] = None
+    password: Optional[str] = None
+    avatar_url: Optional[str] = None
 
 
-class Favorite(Base):
-    __tablename__ = "favorites"
+class UserResponse(BaseModel):
+    id: int
+    telegram_id: Optional[str] = None
+    username: str
+    full_name: Optional[str] = None
+    avatar_url: Optional[str] = None
+    is_admin: bool = False
+    is_superadmin: bool = False
+    is_banned: bool = False
+    rating_sum: float = 0
+    rating_count: int = 0
+    created_at: Optional[datetime] = None
 
-    id = Column(Integer, primary_key=True, index=True)
-    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
-    product_id = Column(Integer, ForeignKey("products.id"), nullable=False, index=True)
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
-
-
-class Review(Base):
-    __tablename__ = "reviews"
-
-    id = Column(Integer, primary_key=True, index=True)
-    order_id = Column(Integer, ForeignKey("orders.id"), nullable=False, unique=True, index=True)
-    seller_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
-    buyer_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
-    rating = Column(Integer, nullable=False)
-    comment = Column(String, nullable=True)
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    class Config:
+        from_attributes = True
 
 
-class AdminLog(Base):
-    __tablename__ = "admin_logs"
-
-    id = Column(Integer, primary_key=True, index=True)
-    admin_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
-    action = Column(String, nullable=False)
-    target_type = Column(String, nullable=True)
-    target_id = Column(Integer, nullable=True)
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
-
-
-class Suggestion(Base):
-    __tablename__ = "suggestions"
-
-    id = Column(Integer, primary_key=True, index=True)
-    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
-    title = Column(String, nullable=False)
-    message = Column(String, nullable=False)
-    status = Column(String, nullable=False, server_default="new")
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
+class ProductBase(BaseModel):
+    seller_id: int
+    title: str
+    description: str
+    price: float
+    currency: Optional[str] = "USD"
+    category: str
+    condition: str
+    city: str
+    image_url: Optional[str] = None
+    image_urls: Optional[List[str]] = None
 
 
-class Report(Base):
-    __tablename__ = "reports"
-
-    id = Column(Integer, primary_key=True, index=True)
-    reporter_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
-    listing_id = Column(Integer, ForeignKey("products.id"), nullable=False, index=True)
-    reason = Column(String, nullable=False)
-    comment = Column(String, nullable=True)
-    status = Column(String, nullable=False, server_default="new")
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
+class ProductCreate(ProductBase):
+    pass
 
 
-class Notification(Base):
-    __tablename__ = "notifications"
-
-    id = Column(Integer, primary_key=True, index=True)
-    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
-    title = Column(String, nullable=False)
-    message = Column(String, nullable=False)
-    type = Column(String, nullable=False, server_default="info")
-    is_read = Column(Boolean, nullable=False, default=False, server_default="false")
-    related_order_id = Column(Integer, ForeignKey("orders.id"), nullable=True, index=True)
-    related_product_id = Column(Integer, ForeignKey("products.id"), nullable=True, index=True)
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
+class ProductUpdate(ProductBase):
+    pass
 
 
-class ProductView(Base):
-    __tablename__ = "product_views"
+class FavoriteCreate(BaseModel):
+    user_id: int
+    product_id: int
 
-    id = Column(Integer, primary_key=True, index=True)
-    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
-    product_id = Column(Integer, ForeignKey("products.id"), nullable=False, index=True)
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+class CartAdd(BaseModel):
+    user_id: int
+    product_id: int
+
+
+class OrderCreate(BaseModel):
+    buyer_id: int
+    product_id: int
+
+
+class OrderDecision(BaseModel):
+    seller_id: int
+    approve: bool
+
+
+class ReviewCreate(BaseModel):
+    buyer_id: int
+    rating: int = Field(ge=1, le=5)
+    comment: Optional[str] = None
+
+
+class SuggestionCreate(BaseModel):
+    user_id: int
+    title: str
+    message: str
+
+
+class SuggestionStatusUpdate(BaseModel):
+    status: str
+
+
+class ReportCreate(BaseModel):
+    reporter_id: int
+    listing_id: int
+    reason: str
+    comment: Optional[str] = None
+
+
+class ReportStatusUpdate(BaseModel):
+    status: str
