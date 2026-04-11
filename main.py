@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import text, or_
 from passlib.context import CryptContext
 
-from database import engine, get_db
+from database import engine, get_db, Base
 import models
 import schemas
 
@@ -39,7 +39,7 @@ app.add_middleware(
 )
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-models.Base.metadata.create_all(bind=engine)
+Base.metadata.create_all(bind=engine)
 ALLOWED_CURRENCIES = {"USD", "UAH", "EUR"}
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 WEBAPP_URL = os.getenv("WEBAPP_URL", "https://p0werful3.github.io/telegram-marketplace-miniapp/?v=401")
