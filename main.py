@@ -18,6 +18,8 @@ import schemas
 
 app = FastAPI(title="Telegram Marketplace API")
 
+print("CORS origins: *")
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
