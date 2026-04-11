@@ -1,12 +1,12 @@
 from datetime import datetime
 from hashlib import sha256
 from urllib.parse import parse_qsl
-from urllib.request import Request, urlopen
+from urllib.request import Request as URLRequest, urlopen
 from urllib.error import URLError, HTTPError
 import json
 import os
 
-from fastapi import FastAPI, Depends, HTTPException, Query
+from fastapi import FastAPI, Depends, HTTPException, Query, Request as FastAPIRequest
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from sqlalchemy import text, or_
@@ -34,8 +34,9 @@ app.add_middleware(
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 models.Base.metadata.create_all(bind=engine)
 ALLOWED_CURRENCIES = {"USD", "UAH", "EUR"}
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "8648644673:AAE4-xVguaXoTSdaHkzGa3uL2bciuIc6wR8")
-WEBAPP_URL = os.getenv("WEBAPP_URL", "https://p0werful3.github.io/telegram-marketplace-miniapp/?v=310")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+WEBAPP_URL = os.getenv("WEBAPP_URL", "https://p0werful3.github.io/telegram-marketplace-miniapp/?v=401")
+TELEGRAM_WEBHOOK_SECRET = os.getenv("TELEGRAM_WEBHOOK_SECRET", "")
 
 
 def run_safe_migrations() -> None:
@@ -305,7 +306,7 @@ def send_telegram_message(telegram_id: str | None, text_message: str, button_tex
     }
 
     try:
-        request = Request(
+        request = URLRequest(
             f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
             data=json.dumps(payload).encode("utf-8"),
             headers={"Content-Type": "application/json"},
@@ -595,6 +596,46 @@ def parse_telegram_init_data(init_data: str | None) -> dict:
     return parsed
 
 
+def upsert_telegram_user(db: Session, telegram_id: str | None, username: str | None, full_name: str | None):
+    telegram_id = normalize_text(telegram_id)
+    username = normalize_text(username).lstrip("@")
+    full_name = normalize_text(full_name) or None
+
+    if not telegram_id or not telegram_id.isdigit():
+        raise HTTPException(status_code=400, detail="Некоректний Telegram ID")
+
+    user = None
+    if username:
+        user = db.query(models.User).filter(models.User.username == username).first()
+    if not user:
+        user = db.query(models.User).filter(models.User.telegram_id == telegram_id).first()
+
+    if user:
+        user.telegram_id = telegram_id
+        if username:
+            user.username = username
+        if full_name:
+            user.full_name = full_name
+        if username == 'powerfull_2' or telegram_id == 'powerfull_2':
+            user.is_admin = True
+            user.is_superadmin = True
+        db.commit()
+        db.refresh(user)
+        return user
+
+    new_user = models.User(
+        telegram_id=telegram_id,
+        username=username or f"tg_{telegram_id}",
+        full_name=full_name,
+        is_admin=(username == 'powerfull_2' or telegram_id == 'powerfull_2'),
+        is_superadmin=(username == 'powerfull_2' or telegram_id == 'powerfull_2'),
+    )
+    db.add(new_user)
+    db.commit()
+    db.refresh(new_user)
+    return new_user
+
+
 @app.post("/auth/telegram", response_model=schemas.UserResponse)
 def telegram_login(data: schemas.TelegramLogin, db: Session = Depends(get_db)):
     parsed = parse_telegram_init_data(data.init_data)
@@ -653,43 +694,45 @@ def telegram_login(data: schemas.TelegramLogin, db: Session = Depends(get_db)):
 
 @app.post("/telegram/start-sync")
 def telegram_start_sync(data: schemas.TelegramLogin, db: Session = Depends(get_db)):
-    telegram_id = normalize_text(data.telegram_id)
-    username = normalize_text(data.username).lstrip("@")
-    full_name = normalize_text(data.full_name) or None
+    user = upsert_telegram_user(db, data.telegram_id, data.username, data.full_name)
+    return {"message": "ok", "user_id": user.id}
 
-    if not telegram_id or not telegram_id.isdigit():
-        raise HTTPException(status_code=400, detail="Некоректний Telegram ID")
 
-    user = None
-    if username:
-        user = db.query(models.User).filter(models.User.username == username).first()
-    if not user:
-        user = db.query(models.User).filter(models.User.telegram_id == telegram_id).first()
+@app.post("/telegram/webhook")
+async def telegram_webhook(request: FastAPIRequest, db: Session = Depends(get_db)):
+    if TELEGRAM_WEBHOOK_SECRET:
+        received_secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
+        if received_secret != TELEGRAM_WEBHOOK_SECRET:
+            raise HTTPException(status_code=403, detail="Invalid telegram webhook secret")
 
-    if user:
-        user.telegram_id = telegram_id
-        if username:
-            user.username = username
-        if full_name:
-            user.full_name = full_name
-        if username == 'powerfull_2' or telegram_id == 'powerfull_2':
-            user.is_admin = True
-            user.is_superadmin = True
-        db.commit()
-        db.refresh(user)
-        return {"message": "ok", "user_id": user.id}
+    update = await request.json()
 
-    new_user = models.User(
-        telegram_id=telegram_id,
-        username=username or f"tg_{telegram_id}",
-        full_name=full_name,
-        is_admin=(username == 'powerfull_2' or telegram_id == 'powerfull_2'),
-        is_superadmin=(username == 'powerfull_2' or telegram_id == 'powerfull_2'),
+    message = update.get("message") or update.get("edited_message")
+    if not message:
+        return {"ok": True}
+
+    text_message = normalize_text(message.get("text"))
+    if not text_message.startswith("/start"):
+        return {"ok": True}
+
+    from_user = message.get("from") or {}
+    telegram_id = str(from_user.get("id") or "")
+    username = normalize_text(from_user.get("username"))
+    first_name = normalize_text(from_user.get("first_name"))
+    last_name = normalize_text(from_user.get("last_name"))
+    full_name = normalize_text(f"{first_name} {last_name}") or None
+
+    upsert_telegram_user(db, telegram_id, username, full_name)
+
+    username_hint = f"{username} (без @)" if username else "username (без @)"
+    welcome_text = (
+        "Ласкаво просимо до Telegram Marketplace!\n\n"
+        "Тут можна відкрити мініапку та отримувати красиві повідомлення про нові запити на покупку.\n\n"
+        f"Для входу через логін вводь username так: {username_hint}"
     )
-    db.add(new_user)
-    db.commit()
-    db.refresh(new_user)
-    return {"message": "ok", "user_id": new_user.id}
+
+    send_telegram_message(telegram_id, welcome_text, "Відкрити маркетплейс")
+    return {"ok": True}
 
 
 @app.get("/users/search")
