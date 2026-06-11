@@ -55,6 +55,12 @@ CLOUDINARY_CLOUD_NAME = os.getenv("CLOUDINARY_CLOUD_NAME", "dw2vkc5ew")
 CLOUDINARY_API_KEY = os.getenv("CLOUDINARY_API_KEY", "")
 CLOUDINARY_API_SECRET = os.getenv("CLOUDINARY_API_SECRET", "")
 
+MAX_ACTIVE_LISTINGS_PER_SELLER = 30
+PRODUCT_TITLE_MIN_LENGTH = 2
+PRODUCT_TITLE_MAX_LENGTH = 80
+PRODUCT_DESCRIPTION_MIN_LENGTH = 5
+PRODUCT_DESCRIPTION_MAX_LENGTH = 1500
+
 if CLOUDINARY_CLOUD_NAME and CLOUDINARY_API_KEY and CLOUDINARY_API_SECRET:
     cloudinary.config(
         cloud_name=CLOUDINARY_CLOUD_NAME,
@@ -654,6 +660,17 @@ def serialize_product(db: Session, product: models.Product, seller: models.User 
     }
 
 
+def ensure_active_listing_capacity(db: Session, seller_id: int, exclude_product_id: int | None = None) -> None:
+    query = db.query(models.Product).filter(
+        models.Product.seller_id == seller_id,
+        models.Product.status == "active",
+    )
+    if exclude_product_id is not None:
+        query = query.filter(models.Product.id != exclude_product_id)
+    if query.count() >= MAX_ACTIVE_LISTINGS_PER_SELLER:
+        raise HTTPException(status_code=400, detail=f"Можна мати максимум {MAX_ACTIVE_LISTINGS_PER_SELLER} активних оголошень")
+
+
 def validate_and_prepare_product_payload(payload: schemas.ProductCreate | schemas.ProductUpdate):
     title = normalize_text(payload.title)
     description = normalize_text(payload.description)
@@ -668,10 +685,14 @@ def validate_and_prepare_product_payload(payload: schemas.ProductCreate | schema
 
     if len(image_urls) > 10:
         raise HTTPException(status_code=400, detail="Можна додати максимум 10 фото")
-    if not title or len(title) < 2:
-        raise HTTPException(status_code=400, detail="Назва товару має бути мінімум 2 символи")
-    if not description or len(description) < 5:
-        raise HTTPException(status_code=400, detail="Опис товару має бути мінімум 5 символів")
+    if not title or len(title) < PRODUCT_TITLE_MIN_LENGTH:
+        raise HTTPException(status_code=400, detail=f"Назва товару має бути мінімум {PRODUCT_TITLE_MIN_LENGTH} символи")
+    if len(title) > PRODUCT_TITLE_MAX_LENGTH:
+        raise HTTPException(status_code=400, detail=f"Назва товару має містити максимум {PRODUCT_TITLE_MAX_LENGTH} символів")
+    if not description or len(description) < PRODUCT_DESCRIPTION_MIN_LENGTH:
+        raise HTTPException(status_code=400, detail=f"Опис товару має бути мінімум {PRODUCT_DESCRIPTION_MIN_LENGTH} символів")
+    if len(description) > PRODUCT_DESCRIPTION_MAX_LENGTH:
+        raise HTTPException(status_code=400, detail=f"Опис товару має містити максимум {PRODUCT_DESCRIPTION_MAX_LENGTH} символів")
     if not category:
         raise HTTPException(status_code=400, detail="Категорія порожня")
     if condition not in ("Новий", "Б/У"):
@@ -1138,6 +1159,7 @@ def create_product(product: schemas.ProductCreate, db: Session = Depends(get_db)
         raise HTTPException(status_code=404, detail="Продавця не знайдено")
     ensure_not_banned(seller)
     ensure_verified_seller(seller)
+    ensure_active_listing_capacity(db, seller.id)
 
     payload = validate_and_prepare_product_payload(product)
     new_product = models.Product(
@@ -1443,6 +1465,7 @@ def restore_product(product_id: int, user_id: int = Query(...), db: Session = De
     seller = db.query(models.User).filter(models.User.id == user_id).first()
     ensure_not_banned(seller)
     ensure_verified_seller(seller)
+    ensure_active_listing_capacity(db, seller.id, exclude_product_id=product.id)
 
     product.status = "active"
     sync_product_activity(product)
@@ -2074,6 +2097,7 @@ def admin_restore_product(product_id: int, current_admin_id: int = Query(...), d
         raise HTTPException(status_code=404, detail="Товар не знайдено")
     if product.status in ("sold", "reserved"):
         raise HTTPException(status_code=400, detail="Проданий або зарезервований товар не можна повернути в активні")
+    ensure_active_listing_capacity(db, product.seller_id, exclude_product_id=product.id)
     product.status = "active"
     sync_product_activity(product)
     db.commit()
@@ -2243,6 +2267,8 @@ async def submit_verification(
     full_name = normalize_text(verification_full_name)
     if len(full_name) < 4:
         raise HTTPException(status_code=400, detail="Вкажіть повне ім'я")
+    if len(full_name) > 120:
+        raise HTTPException(status_code=400, detail="ПІБ має містити максимум 120 символів")
     try:
         birth_date = date.fromisoformat(normalize_text(verification_birth_date))
     except ValueError:
