@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, ForeignKey, DateTime, Float, Boolean
+from sqlalchemy import Column, Integer, String, ForeignKey, DateTime, Float, Boolean, Date
 from sqlalchemy.sql import func
 from database import Base
 
@@ -18,6 +18,18 @@ class User(Base):
     is_banned = Column(Boolean, nullable=False, default=False, server_default="false")
     rating_sum = Column(Float, nullable=False, default=0, server_default="0")
     rating_count = Column(Integer, nullable=False, default=0, server_default="0")
+
+    verification_status = Column(String, nullable=False, default="unverified", server_default="unverified")
+    verification_full_name = Column(String, nullable=True)
+    verification_birth_date = Column(Date, nullable=True)
+    verification_document_front_public_id = Column(String, nullable=True)
+    verification_document_front_format = Column(String, nullable=True)
+    verification_document_back_public_id = Column(String, nullable=True)
+    verification_document_back_format = Column(String, nullable=True)
+    verification_submitted_at = Column(DateTime(timezone=True), nullable=True)
+    verification_reviewed_at = Column(DateTime(timezone=True), nullable=True)
+    verified_at = Column(DateTime(timezone=True), nullable=True)
+    verification_rejection_reason = Column(String, nullable=True)
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
