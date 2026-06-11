@@ -1,12 +1,19 @@
-from datetime import datetime
+from datetime import datetime, date
 from hashlib import sha256
 from urllib.parse import parse_qsl
 from urllib.request import Request as URLRequest, urlopen
 from urllib.error import URLError, HTTPError
+import io
 import json
 import os
+import secrets
+import time
 
-from fastapi import FastAPI, Depends, HTTPException, Query, Request as FastAPIRequest
+import cloudinary
+import cloudinary.uploader
+import cloudinary.utils
+
+from fastapi import FastAPI, Depends, HTTPException, Query, Request as FastAPIRequest, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from sqlalchemy import text, or_
@@ -44,6 +51,17 @@ ALLOWED_CURRENCIES = {"USD", "UAH", "EUR"}
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 WEBAPP_URL = os.getenv("WEBAPP_URL", "https://p0werful3.github.io/telegram-marketplace-miniapp/?v=401")
 TELEGRAM_WEBHOOK_SECRET = os.getenv("TELEGRAM_WEBHOOK_SECRET", "")
+CLOUDINARY_CLOUD_NAME = os.getenv("CLOUDINARY_CLOUD_NAME", "dw2vkc5ew")
+CLOUDINARY_API_KEY = os.getenv("CLOUDINARY_API_KEY", "")
+CLOUDINARY_API_SECRET = os.getenv("CLOUDINARY_API_SECRET", "")
+
+if CLOUDINARY_CLOUD_NAME and CLOUDINARY_API_KEY and CLOUDINARY_API_SECRET:
+    cloudinary.config(
+        cloud_name=CLOUDINARY_CLOUD_NAME,
+        api_key=CLOUDINARY_API_KEY,
+        api_secret=CLOUDINARY_API_SECRET,
+        secure=True,
+    )
 
 
 def run_safe_migrations() -> None:
@@ -55,6 +73,17 @@ def run_safe_migrations() -> None:
         "ALTER TABLE users ADD COLUMN IF NOT EXISTS is_banned BOOLEAN DEFAULT FALSE",
         "ALTER TABLE users ADD COLUMN IF NOT EXISTS rating_sum FLOAT DEFAULT 0",
         "ALTER TABLE users ADD COLUMN IF NOT EXISTS rating_count INTEGER DEFAULT 0",
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS verification_status VARCHAR DEFAULT 'unverified'",
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS verification_full_name VARCHAR",
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS verification_birth_date DATE",
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS verification_document_front_public_id VARCHAR",
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS verification_document_front_format VARCHAR",
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS verification_document_back_public_id VARCHAR",
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS verification_document_back_format VARCHAR",
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS verification_submitted_at TIMESTAMP WITH TIME ZONE",
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS verification_reviewed_at TIMESTAMP WITH TIME ZONE",
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS verified_at TIMESTAMP WITH TIME ZONE",
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS verification_rejection_reason VARCHAR",
 
         "ALTER TABLE products ADD COLUMN IF NOT EXISTS image_url VARCHAR",
         "ALTER TABLE products ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT TRUE",
@@ -100,6 +129,7 @@ def run_safe_migrations() -> None:
         conn.execute(text("UPDATE users SET is_superadmin=TRUE WHERE username='powerfull_2' OR telegram_id='powerfull_2'"))
         conn.execute(text("UPDATE users SET rating_sum=0 WHERE rating_sum IS NULL"))
         conn.execute(text("UPDATE users SET rating_count=0 WHERE rating_count IS NULL"))
+        conn.execute(text("UPDATE users SET verification_status='unverified' WHERE verification_status IS NULL OR verification_status=''"))
 
         conn.execute(
             text(
@@ -304,6 +334,128 @@ def create_notification(db: Session, user_id: int, title: str, message: str, typ
     ))
 
 
+VERIFICATION_ALLOWED_CONTENT_TYPES = {"image/jpeg", "image/png", "image/webp"}
+VERIFICATION_MAX_FILE_SIZE = 6 * 1024 * 1024
+VERIFICATION_STATUSES = {"unverified", "pending", "verified", "rejected"}
+
+
+def verification_status_value(user: models.User | None) -> str:
+    status = normalize_text(getattr(user, "verification_status", None)).lower() if user else "unverified"
+    return status if status in VERIFICATION_STATUSES else "unverified"
+
+
+def ensure_verified_seller(user: models.User | None) -> None:
+    if verification_status_value(user) != "verified":
+        raise HTTPException(status_code=403, detail="Для публікації оголошень необхідно пройти верифікацію продавця")
+
+
+def ensure_cloudinary_ready() -> None:
+    if not (CLOUDINARY_CLOUD_NAME and CLOUDINARY_API_KEY and CLOUDINARY_API_SECRET):
+        raise HTTPException(status_code=503, detail="Cloudinary для документів ще не налаштовано на сервері")
+
+
+def _delete_cloudinary_verification_asset(public_id: str | None) -> None:
+    if not public_id:
+        return
+    ensure_cloudinary_ready()
+    try:
+        result = cloudinary.uploader.destroy(
+            public_id,
+            resource_type="image",
+            type="authenticated",
+            invalidate=True,
+        )
+        if result.get("result") not in {"ok", "not found"}:
+            raise RuntimeError(f"Cloudinary destroy result: {result}")
+    except HTTPException:
+        raise
+    except Exception as exc:
+        print(f"Cloudinary verification delete error: {exc}")
+        raise HTTPException(status_code=502, detail="Не вдалося видалити документ із Cloudinary. Спробуйте ще раз")
+
+
+def delete_user_verification_documents(user: models.User) -> None:
+    front_id = getattr(user, "verification_document_front_public_id", None)
+    back_id = getattr(user, "verification_document_back_public_id", None)
+    _delete_cloudinary_verification_asset(front_id)
+    _delete_cloudinary_verification_asset(back_id)
+    user.verification_document_front_public_id = None
+    user.verification_document_front_format = None
+    user.verification_document_back_public_id = None
+    user.verification_document_back_format = None
+
+
+async def read_verification_file(file: UploadFile | None, required: bool = False) -> tuple[bytes, str] | None:
+    if not file:
+        if required:
+            raise HTTPException(status_code=400, detail="Додайте основне фото документа")
+        return None
+    content_type = normalize_text(file.content_type).lower()
+    if content_type not in VERIFICATION_ALLOWED_CONTENT_TYPES:
+        raise HTTPException(status_code=400, detail="Документ має бути у форматі JPG, PNG або WEBP")
+    data = await file.read()
+    if not data:
+        raise HTTPException(status_code=400, detail="Завантажений файл порожній")
+    if len(data) > VERIFICATION_MAX_FILE_SIZE:
+        raise HTTPException(status_code=400, detail="Максимальний розмір одного фото документа — 6 МБ")
+    extension = {"image/jpeg": "jpg", "image/png": "png", "image/webp": "webp"}[content_type]
+    return data, extension
+
+
+def upload_verification_asset(data: bytes, extension: str, user_id: int, side: str) -> dict:
+    ensure_cloudinary_ready()
+    stream = io.BytesIO(data)
+    stream.name = f"{side}.{extension}"
+    try:
+        return cloudinary.uploader.upload(
+            stream,
+            resource_type="image",
+            type="authenticated",
+            folder=f"verification_documents/{user_id}",
+            public_id=f"{side}_{int(time.time())}_{secrets.token_hex(4)}",
+            overwrite=False,
+            use_filename=False,
+            unique_filename=False,
+        )
+    except Exception as exc:
+        print(f"Cloudinary verification upload error: {exc}")
+        raise HTTPException(status_code=502, detail="Не вдалося завантажити документ у Cloudinary")
+
+
+def verification_document_download_url(user: models.User, side: str) -> str:
+    ensure_cloudinary_ready()
+    if side == "front":
+        public_id = user.verification_document_front_public_id
+        file_format = user.verification_document_front_format
+    elif side == "back":
+        public_id = user.verification_document_back_public_id
+        file_format = user.verification_document_back_format
+    else:
+        raise HTTPException(status_code=400, detail="Некоректна сторона документа")
+    if not public_id or not file_format:
+        raise HTTPException(status_code=404, detail="Фото документа не знайдено")
+    return cloudinary.utils.private_download_url(
+        public_id,
+        file_format,
+        resource_type="image",
+        type="authenticated",
+        expires_at=int(time.time()) + 300,
+        attachment=False,
+    )
+
+
+def serialize_verification_status(user: models.User) -> dict:
+    status = verification_status_value(user)
+    return {
+        "user_id": user.id,
+        "verification_status": status,
+        "verification_rejection_reason": user.verification_rejection_reason if status == "rejected" else None,
+        "verification_submitted_at": user.verification_submitted_at.isoformat() if user.verification_submitted_at else None,
+        "verification_reviewed_at": user.verification_reviewed_at.isoformat() if user.verification_reviewed_at else None,
+        "verified_at": user.verified_at.isoformat() if user.verified_at else None,
+    }
+
+
 def _is_real_telegram_id(value: str | None) -> bool:
     raw = normalize_text(value)
     return raw.isdigit() if raw else False
@@ -493,6 +645,8 @@ def serialize_product(db: Session, product: models.Product, seller: models.User 
         "seller_name": seller.full_name if seller else None,
         "seller_telegram_link": f"https://t.me/{seller.username}" if seller and seller.username else None,
         "seller_rating": rating_value(seller) if seller else 0,
+        "seller_verification_status": verification_status_value(seller),
+        "seller_is_verified": verification_status_value(seller) == "verified",
         "created_at": product.created_at.isoformat() if product.created_at else None,
         "views_count": int(getattr(product, "views_count", 0) or 0),
         "is_favorite": is_favorite_product(db, current_user_id, product.id),
@@ -877,6 +1031,8 @@ def get_public_profile(user_id: int, current_user_id: int | None = Query(default
         "bought_products": bought_products,
         "listings": [serialize_product(db, item, user, current_user_id) for item in active_listing_items],
         "seller_status": seller_badge(sold_products, user.rating_count or 0),
+        "verification_status": verification_status_value(user),
+        "is_verified": verification_status_value(user) == "verified",
         "registered_at": user.created_at.isoformat() if user.created_at else None,
         "telegram_link": f"https://t.me/{user.username}" if user.username else None,
     }
@@ -981,6 +1137,7 @@ def create_product(product: schemas.ProductCreate, db: Session = Depends(get_db)
     if not seller:
         raise HTTPException(status_code=404, detail="Продавця не знайдено")
     ensure_not_banned(seller)
+    ensure_verified_seller(seller)
 
     payload = validate_and_prepare_product_payload(product)
     new_product = models.Product(
@@ -1283,6 +1440,9 @@ def restore_product(product_id: int, user_id: int = Query(...), db: Session = De
         raise HTTPException(status_code=403, detail="Це не ваше оголошення")
     if product.status != "archived":
         raise HTTPException(status_code=400, detail="Оголошення не в архіві")
+    seller = db.query(models.User).filter(models.User.id == user_id).first()
+    ensure_not_banned(seller)
+    ensure_verified_seller(seller)
 
     product.status = "active"
     sync_product_activity(product)
@@ -1771,6 +1931,7 @@ def get_admin_summary(current_admin_id: int = Query(...), db: Session = Depends(
         "suggestions_new": db.query(models.Suggestion).filter(models.Suggestion.status == "new").count(),
         "reports_new": db.query(models.Report).filter(models.Report.status == "new").count(),
         "orders_disputed": db.query(models.Order).filter(models.Order.status == "disputed").count(),
+        "verifications_pending": db.query(models.User).filter(models.User.verification_status == "pending").count(),
     }
 
 
@@ -1800,6 +1961,7 @@ def admin_list_users(current_admin_id: int = Query(...), q: str | None = Query(d
             "is_banned": user.is_banned,
             "rating": rating_value(user),
             "rating_count": user.rating_count or 0,
+            "verification_status": verification_status_value(user),
             "active_products": db.query(models.Product).filter(models.Product.seller_id == user.id, models.Product.status == "active").count(),
             "sold_products": db.query(models.Product).filter(models.Product.seller_id == user.id, models.Product.status == "sold").count(),
         })
@@ -2047,6 +2209,158 @@ def create_report(data: schemas.ReportCreate, db: Session = Depends(get_db)):
     return {"message": "Скаргу надіслано"}
 
 
+@app.get("/users/{user_id}/verification")
+def get_verification_status(user_id: int, db: Session = Depends(get_db)):
+    user = db.query(models.User).filter(models.User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="Користувача не знайдено")
+    ensure_not_banned(user)
+    return serialize_verification_status(user)
+
+
+@app.post("/users/{user_id}/verification/submit")
+async def submit_verification(
+    user_id: int,
+    verification_full_name: str = Form(...),
+    verification_birth_date: str = Form(...),
+    consent_accepted: bool = Form(...),
+    document_front: UploadFile = File(...),
+    document_back: UploadFile | None = File(default=None),
+    db: Session = Depends(get_db),
+):
+    user = db.query(models.User).filter(models.User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="Користувача не знайдено")
+    ensure_not_banned(user)
+    status = verification_status_value(user)
+    if status == "pending":
+        raise HTTPException(status_code=400, detail="Заявка вже знаходиться на перевірці")
+    if status == "verified":
+        raise HTTPException(status_code=400, detail="Верифікацію вже пройдено")
+    if not consent_accepted:
+        raise HTTPException(status_code=400, detail="Потрібна згода на обробку даних для перевірки профілю")
+
+    full_name = normalize_text(verification_full_name)
+    if len(full_name) < 4:
+        raise HTTPException(status_code=400, detail="Вкажіть повне ім'я")
+    try:
+        birth_date = date.fromisoformat(normalize_text(verification_birth_date))
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Некоректна дата народження")
+    if birth_date >= date.today():
+        raise HTTPException(status_code=400, detail="Некоректна дата народження")
+
+    front_file = await read_verification_file(document_front, required=True)
+    back_file = await read_verification_file(document_back, required=False)
+
+    # Old rejected files normally do not remain, but this cleanup prevents orphaned assets after interrupted requests.
+    if user.verification_document_front_public_id or user.verification_document_back_public_id:
+        delete_user_verification_documents(user)
+
+    front_upload = None
+    back_upload = None
+    try:
+        front_upload = upload_verification_asset(front_file[0], front_file[1], user.id, "front")
+        if back_file:
+            back_upload = upload_verification_asset(back_file[0], back_file[1], user.id, "back")
+    except Exception:
+        if front_upload and front_upload.get("public_id"):
+            _delete_cloudinary_verification_asset(front_upload.get("public_id"))
+        if back_upload and back_upload.get("public_id"):
+            _delete_cloudinary_verification_asset(back_upload.get("public_id"))
+        raise
+
+    now = datetime.utcnow()
+    user.verification_status = "pending"
+    user.verification_full_name = full_name
+    user.verification_birth_date = birth_date
+    user.verification_document_front_public_id = front_upload.get("public_id")
+    user.verification_document_front_format = front_upload.get("format") or front_file[1]
+    user.verification_document_back_public_id = back_upload.get("public_id") if back_upload else None
+    user.verification_document_back_format = (back_upload.get("format") or back_file[1]) if back_upload and back_file else None
+    user.verification_submitted_at = now
+    user.verification_reviewed_at = None
+    user.verified_at = None
+    user.verification_rejection_reason = None
+    create_notification(db, user.id, "Заявку на верифікацію надіслано", "Очікуйте перевірки адміністратором", "verification")
+    db.commit()
+    return {"message": "Заявку надіслано на перевірку", **serialize_verification_status(user)}
+
+
+@app.get("/admin/verifications")
+def admin_list_verifications(current_admin_id: int = Query(...), db: Session = Depends(get_db)):
+    require_admin(db, current_admin_id)
+    users = db.query(models.User).filter(
+        models.User.verification_status.in_(["pending", "verified", "rejected"])
+    ).order_by(models.User.verification_submitted_at.desc().nullslast(), models.User.id.desc()).all()
+    result = []
+    for user in users:
+        result.append({
+            "user_id": user.id,
+            "username": user.username,
+            "full_name": user.full_name,
+            "verification_full_name": user.verification_full_name,
+            "verification_birth_date": user.verification_birth_date.isoformat() if user.verification_birth_date else None,
+            "verification_status": verification_status_value(user),
+            "verification_submitted_at": user.verification_submitted_at.isoformat() if user.verification_submitted_at else None,
+            "verification_reviewed_at": user.verification_reviewed_at.isoformat() if user.verification_reviewed_at else None,
+            "verified_at": user.verified_at.isoformat() if user.verified_at else None,
+            "verification_rejection_reason": user.verification_rejection_reason,
+            "has_front_document": bool(user.verification_document_front_public_id),
+            "has_back_document": bool(user.verification_document_back_public_id),
+        })
+    return result
+
+
+@app.get("/admin/verifications/{user_id}/document/{side}")
+def admin_get_verification_document(user_id: int, side: str, current_admin_id: int = Query(...), db: Session = Depends(get_db)):
+    require_admin(db, current_admin_id)
+    user = db.query(models.User).filter(models.User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="Користувача не знайдено")
+    return {"url": verification_document_download_url(user, normalize_text(side).lower()), "expires_in": 300}
+
+
+@app.post("/admin/verifications/{user_id}/decision")
+def admin_decide_verification(user_id: int, data: schemas.VerificationDecision, current_admin_id: int = Query(...), db: Session = Depends(get_db)):
+    require_admin(db, current_admin_id)
+    user = db.query(models.User).filter(models.User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="Користувача не знайдено")
+    if verification_status_value(user) != "pending":
+        raise HTTPException(status_code=400, detail="Заявка вже не знаходиться на перевірці")
+
+    action = normalize_text(data.action).lower()
+    if action not in {"approve", "reject"}:
+        raise HTTPException(status_code=400, detail="Некоректна дія")
+    reason = normalize_text(data.reason)
+    if action == "reject" and len(reason) < 3:
+        raise HTTPException(status_code=400, detail="Вкажіть причину відмови")
+
+    # Documents must be removed immediately after either admin decision.
+    delete_user_verification_documents(user)
+    now = datetime.utcnow()
+    user.verification_reviewed_at = now
+    if action == "approve":
+        user.verification_status = "verified"
+        user.verified_at = now
+        user.verification_rejection_reason = None
+        title = "Верифікацію пройдено"
+        message = "Ваш профіль підтверджено. Тепер ви можете публікувати оголошення"
+    else:
+        user.verification_status = "rejected"
+        user.verified_at = None
+        user.verification_rejection_reason = reason
+        title = "Верифікацію відхилено"
+        message = f"Причина: {reason}"
+
+    create_notification(db, user.id, title, message, "verification")
+    db.commit()
+    log_admin_action(db, current_admin_id, f"verification-{action} @{user.username}", "user", user.id)
+    notify_user_in_telegram(user, message)
+    return {"message": title, **serialize_verification_status(user)}
+
+
 @app.get("/admin/suggestions")
 def admin_list_suggestions(current_admin_id: int = Query(...), db: Session = Depends(get_db)):
     require_admin(db, current_admin_id)
@@ -2076,8 +2390,6 @@ def admin_update_suggestion_status(suggestion_id: int, data: schemas.SuggestionS
     mapping = {"new": "new", "review": "review", "done": "done"}
     if status not in mapping:
         raise HTTPException(status_code=400, detail="Некоректний статус")
-    if item.report_type == "order" and status == "done":
-        raise HTTPException(status_code=400, detail="Для спору щодо угоди оберіть рішення: завершити, скасувати або повернути на підтвердження")
     item.status = mapping[status]
     db.commit()
     log_admin_action(db, current_admin_id, f"suggestion-status {status} #{item.id}", "suggestion", item.id)
