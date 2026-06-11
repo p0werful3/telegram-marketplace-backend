@@ -75,6 +75,9 @@ class Order(Base):
     seller_link = Column(String, nullable=True)
     status = Column(String, nullable=False, server_default="pending")
     seller_response_at = Column(DateTime(timezone=True), nullable=True)
+    buyer_confirmation_at = Column(DateTime(timezone=True), nullable=True)
+    dispute_at = Column(DateTime(timezone=True), nullable=True)
+    completed_at = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
 
@@ -126,10 +129,14 @@ class Report(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     reporter_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
-    listing_id = Column(Integer, ForeignKey("products.id"), nullable=False, index=True)
+    listing_id = Column(Integer, ForeignKey("products.id"), nullable=True, index=True)
+    reported_user_id = Column(Integer, ForeignKey("users.id"), nullable=True, index=True)
+    order_id = Column(Integer, ForeignKey("orders.id"), nullable=True, index=True)
+    report_type = Column(String, nullable=False, server_default="listing")
     reason = Column(String, nullable=False)
     comment = Column(String, nullable=True)
     status = Column(String, nullable=False, server_default="new")
+    resolved_at = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
 
