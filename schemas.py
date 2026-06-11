@@ -90,6 +90,11 @@ class OrderDecision(BaseModel):
     approve: bool
 
 
+class OrderIssueCreate(BaseModel):
+    actor_id: int
+    comment: Optional[str] = None
+
+
 class ReviewCreate(BaseModel):
     buyer_id: int
     rating: int = Field(ge=1, le=5)
@@ -108,10 +113,17 @@ class SuggestionStatusUpdate(BaseModel):
 
 class ReportCreate(BaseModel):
     reporter_id: int
-    listing_id: int
+    report_type: str = "listing"
+    listing_id: Optional[int] = None
+    reported_user_id: Optional[int] = None
+    order_id: Optional[int] = None
     reason: str
     comment: Optional[str] = None
 
 
 class ReportStatusUpdate(BaseModel):
     status: str
+
+
+class ReportResolution(BaseModel):
+    action: str
