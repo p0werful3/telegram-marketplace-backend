@@ -43,6 +43,8 @@ class UserResponse(BaseModel):
     is_banned: bool = False
     rating_sum: float = 0
     rating_count: int = 0
+    verification_status: str = "unverified"
+    verification_rejection_reason: Optional[str] = None
     created_at: Optional[datetime] = None
 
     class Config:
@@ -127,3 +129,8 @@ class ReportStatusUpdate(BaseModel):
 
 class ReportResolution(BaseModel):
     action: str
+
+
+class VerificationDecision(BaseModel):
+    action: str
+    reason: Optional[str] = None
