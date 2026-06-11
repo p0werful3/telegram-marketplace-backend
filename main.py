@@ -79,6 +79,14 @@ def run_safe_migrations() -> None:
         "ALTER TABLE orders ADD COLUMN IF NOT EXISTS status VARCHAR DEFAULT 'pending'",
         "ALTER TABLE orders ADD COLUMN IF NOT EXISTS created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()",
         "ALTER TABLE orders ADD COLUMN IF NOT EXISTS seller_response_at TIMESTAMP WITH TIME ZONE",
+        "ALTER TABLE orders ADD COLUMN IF NOT EXISTS buyer_confirmation_at TIMESTAMP WITH TIME ZONE",
+        "ALTER TABLE orders ADD COLUMN IF NOT EXISTS dispute_at TIMESTAMP WITH TIME ZONE",
+        "ALTER TABLE orders ADD COLUMN IF NOT EXISTS completed_at TIMESTAMP WITH TIME ZONE",
+        "ALTER TABLE reports ALTER COLUMN listing_id DROP NOT NULL",
+        "ALTER TABLE reports ADD COLUMN IF NOT EXISTS report_type VARCHAR DEFAULT 'listing'",
+        "ALTER TABLE reports ADD COLUMN IF NOT EXISTS reported_user_id INTEGER",
+        "ALTER TABLE reports ADD COLUMN IF NOT EXISTS order_id INTEGER",
+        "ALTER TABLE reports ADD COLUMN IF NOT EXISTS resolved_at TIMESTAMP WITH TIME ZONE",
     ]
 
     with engine.begin() as conn:
@@ -177,10 +185,14 @@ def run_safe_migrations() -> None:
                 CREATE TABLE IF NOT EXISTS reports (
                     id SERIAL PRIMARY KEY,
                     reporter_id INTEGER NOT NULL REFERENCES users(id),
-                    listing_id INTEGER NOT NULL REFERENCES products(id),
+                    listing_id INTEGER REFERENCES products(id),
+                    reported_user_id INTEGER REFERENCES users(id),
+                    order_id INTEGER REFERENCES orders(id),
+                    report_type VARCHAR NOT NULL DEFAULT 'listing',
                     reason VARCHAR NOT NULL,
                     comment VARCHAR,
                     status VARCHAR NOT NULL DEFAULT 'new',
+                    resolved_at TIMESTAMP WITH TIME ZONE,
                     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
                 )
                 """
@@ -191,6 +203,7 @@ def run_safe_migrations() -> None:
         conn.execute(text("UPDATE products SET city='Київ' WHERE city IS NULL OR city=''"))
         conn.execute(text("UPDATE products SET currency='USD' WHERE currency IS NULL OR currency=''"))
         conn.execute(text("UPDATE orders SET currency='USD' WHERE currency IS NULL OR currency=''"))
+        conn.execute(text("UPDATE reports SET report_type='listing' WHERE report_type IS NULL OR report_type=''"))
 
         conn.execute(
             text(
@@ -374,6 +387,42 @@ def log_admin_action(db: Session, admin_id: int, action: str, target_type: str |
     db.commit()
 
 
+def create_report_record(
+    db: Session,
+    reporter_id: int,
+    report_type: str,
+    reason: str,
+    comment: str | None = None,
+    listing_id: int | None = None,
+    reported_user_id: int | None = None,
+    order_id: int | None = None,
+) -> models.Report:
+    report = models.Report(
+        reporter_id=reporter_id,
+        report_type=report_type,
+        listing_id=listing_id,
+        reported_user_id=reported_user_id,
+        order_id=order_id,
+        reason=reason,
+        comment=normalize_text(comment) or None,
+        status="new",
+    )
+    db.add(report)
+    db.flush()
+    return report
+
+
+def find_open_order_report(db: Session, order_id: int, reporter_id: int | None = None) -> models.Report | None:
+    query = db.query(models.Report).filter(
+        models.Report.order_id == order_id,
+        models.Report.report_type == "order",
+        models.Report.status.in_(["new", "review"]),
+    )
+    if reporter_id is not None:
+        query = query.filter(models.Report.reporter_id == reporter_id)
+    return query.order_by(models.Report.id.desc()).first()
+
+
 def normalize_currency(value: str | None) -> str:
     currency = normalize_text(value).upper() or "USD"
     if currency not in ALLOWED_CURRENCIES:
@@ -499,9 +548,9 @@ def _serialize_simple_my_product(product: models.Product, db: Session):
         models.Order.product_id == product.id,
         models.Order.status == "pending"
     ).order_by(models.Order.id.desc()).first()
-    approved_order = db.query(models.Order).filter(
+    completed_order = db.query(models.Order).filter(
         models.Order.product_id == product.id,
-        models.Order.status == "approved"
+        models.Order.status.in_(["completed", "approved"])
     ).order_by(models.Order.id.desc()).first()
 
     return {
@@ -532,14 +581,14 @@ def _serialize_simple_my_product(product: models.Product, db: Session):
             "currency": latest_pending_order.currency if latest_pending_order else None,
         } if latest_pending_order else None,
         "sale_info": {
-            "order_id": approved_order.id,
-            "sold_at": approved_order.seller_response_at.isoformat() if approved_order and approved_order.seller_response_at else None,
-            "buyer_id": approved_order.buyer_id if approved_order else None,
-            "buyer_username": approved_order.buyer_username if approved_order else None,
-            "buyer_full_name": approved_order.buyer_full_name if approved_order else None,
-            "offered_price": approved_order.offered_price if approved_order else None,
-            "currency": approved_order.currency if approved_order else None,
-        } if approved_order else None,
+            "order_id": completed_order.id,
+            "sold_at": (completed_order.completed_at or completed_order.buyer_confirmation_at or completed_order.seller_response_at).isoformat() if completed_order and (completed_order.completed_at or completed_order.buyer_confirmation_at or completed_order.seller_response_at) else None,
+            "buyer_id": completed_order.buyer_id if completed_order else None,
+            "buyer_username": completed_order.buyer_username if completed_order else None,
+            "buyer_full_name": completed_order.buyer_full_name if completed_order else None,
+            "offered_price": completed_order.offered_price if completed_order else None,
+            "currency": completed_order.currency if completed_order else None,
+        } if completed_order else None,
     }
 
 
@@ -805,7 +854,7 @@ def get_public_profile(user_id: int, current_user_id: int | None = Query(default
 
     bought_products = db.query(models.Order).filter(
         models.Order.buyer_id == user.id,
-        models.Order.status == "approved"
+        models.Order.status.in_(["completed", "approved"])
     ).count()
 
     active_listing_items = db.query(models.Product).filter(
@@ -892,7 +941,7 @@ def get_user_stats(user_id: int, db: Session = Depends(get_db)):
         "cart_items": db.query(models.CartItem).filter(models.CartItem.user_id == user_id).count(),
         "pending_requests": db.query(models.Order).filter(models.Order.seller_id == user_id, models.Order.status == "pending").count(),
         "purchase_history": db.query(models.Order).filter(models.Order.buyer_id == user_id).count(),
-        "purchase_pending": db.query(models.Order).filter(models.Order.buyer_id == user_id, models.Order.status == "pending").count(),
+        "purchase_pending": db.query(models.Order).filter(models.Order.buyer_id == user_id, models.Order.status.in_(["pending", "awaiting_buyer_confirmation", "disputed"])).count(),
         "unread_notifications": db.query(models.Notification).filter(models.Notification.user_id == user_id, models.Notification.is_read == False).count(),
     }
 
@@ -1109,7 +1158,9 @@ def get_purchase_requests(user_id: int, status: str = Query(default="pending"), 
         raise HTTPException(status_code=404, detail="Користувача не знайдено")
 
     query = db.query(models.Order).filter(models.Order.seller_id == user_id)
-    if status != "all":
+    if status == "open":
+        query = query.filter(models.Order.status.in_(["pending", "awaiting_buyer_confirmation", "disputed"]))
+    elif status != "all":
         query = query.filter(models.Order.status == status)
 
     orders = query.order_by(models.Order.id.desc()).all()
@@ -1123,6 +1174,8 @@ def get_purchase_requests(user_id: int, status: str = Query(default="pending"), 
             "order_id": order.id,
             "status": order.status,
             "created_at": order.created_at.isoformat() if order.created_at else None,
+            "seller_response_at": order.seller_response_at.isoformat() if order.seller_response_at else None,
+            "dispute_at": order.dispute_at.isoformat() if order.dispute_at else None,
             "product_id": product.id,
             "product_title": product.title,
             "product_image_url": product.image_url,
@@ -1153,6 +1206,9 @@ def get_purchase_history(user_id: int, db: Session = Depends(get_db)):
             "status": order.status,
             "created_at": order.created_at.isoformat() if order.created_at else None,
             "seller_response_at": order.seller_response_at.isoformat() if order.seller_response_at else None,
+            "buyer_confirmation_at": order.buyer_confirmation_at.isoformat() if order.buyer_confirmation_at else None,
+            "dispute_at": order.dispute_at.isoformat() if order.dispute_at else None,
+            "completed_at": order.completed_at.isoformat() if order.completed_at else None,
             "product_id": order.product_id,
             "product_title": product.title if product else f"Товар #{order.product_id}",
             "product_image_url": product.image_url if product else None,
@@ -1162,7 +1218,7 @@ def get_purchase_history(user_id: int, db: Session = Depends(get_db)):
             "seller_id": order.seller_id,
             "seller_username": seller.username if seller else order.seller_username,
             "seller_full_name": seller.full_name if seller else None,
-            "can_review": order.status == "approved" and review is None,
+            "can_review": order.status in ("completed", "approved") and review is None,
             "review_rating": review.rating if review else None,
         })
     return result
@@ -1177,7 +1233,19 @@ def cancel_order(order_id: int, buyer_id: int = Query(...), db: Session = Depend
         raise HTTPException(status_code=403, detail="Це не ваш запит")
     if order.status != "pending":
         raise HTTPException(status_code=400, detail="Скасувати можна тільки запит, який очікує підтвердження")
-    db.delete(order)
+    order.status = "cancelled"
+    seller = db.query(models.User).filter(models.User.id == order.seller_id).first() if order.seller_id else None
+    product = db.query(models.Product).filter(models.Product.id == order.product_id).first()
+    if seller:
+        create_notification(
+            db,
+            seller.id,
+            "Запит скасовано покупцем",
+            f"Покупець скасував запит на товар «{product.title if product else ('#' + str(order.product_id))}»",
+            "order",
+            related_order_id=order.id,
+            related_product_id=order.product_id,
+        )
     db.commit()
     return {"message": "Запит скасовано"}
 
@@ -1189,6 +1257,8 @@ def delete_product(product_id: int, user_id: int = Query(...), db: Session = Dep
         raise HTTPException(status_code=404, detail="Товар не знайдено")
     if product.seller_id != user_id:
         raise HTTPException(status_code=403, detail="Це не ваше оголошення")
+    if product.status == "reserved":
+        raise HTTPException(status_code=400, detail="Товар зарезервовано в активній угоді. Спочатку зверніться до адміністратора")
 
     product.status = "archived"
     sync_product_activity(product)
@@ -1461,7 +1531,7 @@ def decide_order(order_id: int, data: schemas.OrderDecision, db: Session = Depen
         db.commit()
         return {"message": "Товар уже недоступний, запит прибрано"}
 
-    order.status = "approved" if data.approve else "rejected"
+    order.status = "awaiting_buyer_confirmation" if data.approve else "rejected"
     order.seller_response_at = datetime.utcnow()
 
     other_pending_orders = []
@@ -1471,7 +1541,7 @@ def decide_order(order_id: int, data: schemas.OrderDecision, db: Session = Depen
             models.Order.id != order.id,
             models.Order.status == "pending"
         ).all()
-        product.status = "sold"
+        product.status = "reserved"
         sync_product_activity(product)
         db.query(models.CartItem).filter(models.CartItem.product_id == product.id).delete()
         db.query(models.Favorite).filter(models.Favorite.product_id == product.id).delete()
@@ -1481,7 +1551,11 @@ def decide_order(order_id: int, data: schemas.OrderDecision, db: Session = Depen
 
     buyer = db.query(models.User).filter(models.User.id == order.buyer_id).first()
     if buyer and product:
-        buyer_message = (f"Продавець підтвердив продаж товару «{product.title}»" if data.approve else f"Продавець відхилив запит на «{product.title}»")
+        buyer_message = (
+            f"Продавець підтвердив продаж товару «{product.title}». Після передачі товару підтвердьте отримання в історії покупок."
+            if data.approve
+            else f"Продавець відхилив запит на «{product.title}»"
+        )
         create_notification(
             db,
             buyer.id,
@@ -1493,7 +1567,12 @@ def decide_order(order_id: int, data: schemas.OrderDecision, db: Session = Depen
         )
         notify_user_in_telegram(
             buyer,
-            f"{'✅ Ваш запит підтверджено' if data.approve else '❌ Ваш запит відхилено'}\n\nТовар: {product.title}\nПродавець: @{order.seller_username or 'seller'}\n\n{'Домовтеся із продавцем про деталі в маркетплейсі.' if data.approve else 'Можете переглянути інші товари в маркетплейсі.'}",
+            f"""{'✅ Продавець підтвердив ваш запит' if data.approve else '❌ Ваш запит відхилено'}
+
+Товар: {product.title}
+Продавець: @{order.seller_username or 'seller'}
+
+{'Після передачі товару відкрийте історію покупок і підтвердьте отримання.' if data.approve else 'Можете переглянути інші товари в маркетплейсі.'}""",
             "Відкрити маркетплейс"
         )
 
@@ -1505,19 +1584,144 @@ def decide_order(order_id: int, data: schemas.OrderDecision, db: Session = Depen
             create_notification(
                 db,
                 other_buyer.id,
-                "Товар уже продано",
-                f"На жаль, товар «{product.title}» уже підтверджено іншому покупцю",
+                "Товар уже зарезервовано",
+                f"На жаль, товар «{product.title}» зарезервовано за іншим покупцем",
                 "order",
                 related_order_id=pending.id,
                 related_product_id=product.id,
             )
             notify_user_in_telegram(
                 other_buyer,
-                f"ℹ️ Товар уже продано\n\nНа жаль, товар «{product.title}» продавець підтвердив іншому покупцю.",
+                f"""ℹ️ Товар уже зарезервовано
+
+На жаль, товар «{product.title}» продавець підтвердив іншому покупцю.""",
                 "Переглянути каталог"
             )
     db.commit()
-    return {"message": "Запит підтверджено" if data.approve else "Запит відхилено"}
+    return {"message": "Запит підтверджено. Очікується підтвердження покупця" if data.approve else "Запит відхилено"}
+
+
+@app.post("/orders/{order_id}/buyer-confirm")
+def confirm_order_received(order_id: int, buyer_id: int = Query(...), db: Session = Depends(get_db)):
+    order = db.query(models.Order).filter(models.Order.id == order_id).first()
+    if not order:
+        raise HTTPException(status_code=404, detail="Замовлення не знайдено")
+    if order.buyer_id != buyer_id:
+        raise HTTPException(status_code=403, detail="Це не ваше замовлення")
+    if order.status in ("completed", "approved"):
+        return {"message": "Отримання вже підтверджено"}
+    if order.status != "awaiting_buyer_confirmation":
+        raise HTTPException(status_code=400, detail="Зараз не можна підтвердити отримання товару")
+
+    product = db.query(models.Product).filter(models.Product.id == order.product_id).first()
+    now = datetime.utcnow()
+    order.status = "completed"
+    order.buyer_confirmation_at = now
+    order.completed_at = now
+    if product:
+        product.status = "sold"
+        sync_product_activity(product)
+
+    seller = db.query(models.User).filter(models.User.id == order.seller_id).first() if order.seller_id else None
+    if seller:
+        create_notification(
+            db,
+            seller.id,
+            "Угоду завершено",
+            f"Покупець підтвердив отримання товару «{product.title if product else ('#' + str(order.product_id))}»",
+            "order",
+            related_order_id=order.id,
+            related_product_id=order.product_id,
+        )
+        notify_user_in_telegram(
+            seller,
+            f"""✅ Угоду завершено
+
+Покупець підтвердив отримання товару: {product.title if product else ('#' + str(order.product_id))}""",
+            "Відкрити маркетплейс"
+        )
+    db.commit()
+    return {"message": "Дякуємо. Угоду завершено", "status": order.status}
+
+
+@app.post("/orders/{order_id}/buyer-dispute")
+def buyer_report_missing_product(order_id: int, data: schemas.OrderIssueCreate, db: Session = Depends(get_db)):
+    order = db.query(models.Order).filter(models.Order.id == order_id).first()
+    if not order:
+        raise HTTPException(status_code=404, detail="Замовлення не знайдено")
+    if order.buyer_id != data.actor_id:
+        raise HTTPException(status_code=403, detail="Це не ваше замовлення")
+    if order.status == "disputed":
+        return {"message": "Спір уже передано адміністратору", "status": order.status}
+    if order.status != "awaiting_buyer_confirmation":
+        raise HTTPException(status_code=400, detail="Відкрити спір можна тільки після підтвердження продавця")
+
+    product = db.query(models.Product).filter(models.Product.id == order.product_id).first()
+    order.status = "disputed"
+    order.dispute_at = datetime.utcnow()
+    create_report_record(
+        db,
+        reporter_id=order.buyer_id,
+        reported_user_id=order.seller_id,
+        listing_id=order.product_id,
+        order_id=order.id,
+        report_type="order",
+        reason="Не отримав товар",
+        comment=data.comment,
+    )
+    seller = db.query(models.User).filter(models.User.id == order.seller_id).first() if order.seller_id else None
+    if seller:
+        create_notification(
+            db,
+            seller.id,
+            "Відкрито спір щодо угоди",
+            f"Покупець повідомив, що не отримав товар «{product.title if product else ('#' + str(order.product_id))}». Скаргу передано адміністратору.",
+            "warning",
+            related_order_id=order.id,
+            related_product_id=order.product_id,
+        )
+    db.commit()
+    return {"message": "Спір передано адміністратору", "status": order.status}
+
+
+@app.post("/orders/{order_id}/seller-dispute")
+def seller_report_buyer_delay(order_id: int, data: schemas.OrderIssueCreate, db: Session = Depends(get_db)):
+    order = db.query(models.Order).filter(models.Order.id == order_id).first()
+    if not order:
+        raise HTTPException(status_code=404, detail="Замовлення не знайдено")
+    if order.seller_id != data.actor_id:
+        raise HTTPException(status_code=403, detail="Це не ваша угода")
+    if order.status == "disputed":
+        return {"message": "Спір уже передано адміністратору", "status": order.status}
+    if order.status != "awaiting_buyer_confirmation":
+        raise HTTPException(status_code=400, detail="Звернутися до адміністратора можна тільки під час очікування підтвердження покупця")
+
+    product = db.query(models.Product).filter(models.Product.id == order.product_id).first()
+    order.status = "disputed"
+    order.dispute_at = datetime.utcnow()
+    create_report_record(
+        db,
+        reporter_id=order.seller_id,
+        reported_user_id=order.buyer_id,
+        listing_id=order.product_id,
+        order_id=order.id,
+        report_type="order",
+        reason="Покупець не підтверджує отримання",
+        comment=data.comment,
+    )
+    buyer = db.query(models.User).filter(models.User.id == order.buyer_id).first()
+    if buyer:
+        create_notification(
+            db,
+            buyer.id,
+            "Відкрито спір щодо угоди",
+            f"Продавець звернувся до адміністратора щодо товару «{product.title if product else ('#' + str(order.product_id))}».",
+            "warning",
+            related_order_id=order.id,
+            related_product_id=order.product_id,
+        )
+    db.commit()
+    return {"message": "Звернення передано адміністратору", "status": order.status}
 
 
 @app.post("/orders/{order_id}/review")
@@ -1527,8 +1731,8 @@ def create_review(order_id: int, data: schemas.ReviewCreate, db: Session = Depen
         raise HTTPException(status_code=404, detail="Замовлення не знайдено")
     if order.buyer_id != data.buyer_id:
         raise HTTPException(status_code=403, detail="Це не ваше замовлення")
-    if order.status != "approved":
-        raise HTTPException(status_code=400, detail="Оцінити можна тільки підтверджену покупку")
+    if order.status not in ("completed", "approved"):
+        raise HTTPException(status_code=400, detail="Оцінити можна тільки завершену покупку")
 
     existing_review = db.query(models.Review).filter(models.Review.order_id == order.id).first()
     if existing_review:
@@ -1566,6 +1770,7 @@ def get_admin_summary(current_admin_id: int = Query(...), db: Session = Depends(
         "admins": db.query(models.User).filter(models.User.is_admin == True).count(),
         "suggestions_new": db.query(models.Suggestion).filter(models.Suggestion.status == "new").count(),
         "reports_new": db.query(models.Report).filter(models.Report.status == "new").count(),
+        "orders_disputed": db.query(models.Order).filter(models.Order.status == "disputed").count(),
     }
 
 
@@ -1685,6 +1890,8 @@ def admin_archive_product(product_id: int, current_admin_id: int = Query(...), d
     product = db.query(models.Product).filter(models.Product.id == product_id).first()
     if not product:
         raise HTTPException(status_code=404, detail="Товар не знайдено")
+    if product.status == "reserved":
+        raise HTTPException(status_code=400, detail="Товар зарезервовано в активній угоді. Спочатку вирішіть спір або скасуйте угоду")
     product.status = "archived"
     sync_product_activity(product)
     db.query(models.Order).filter(
@@ -1703,8 +1910,8 @@ def admin_restore_product(product_id: int, current_admin_id: int = Query(...), d
     product = db.query(models.Product).filter(models.Product.id == product_id).first()
     if not product:
         raise HTTPException(status_code=404, detail="Товар не знайдено")
-    if product.status == "sold":
-        raise HTTPException(status_code=400, detail="Проданий товар не можна повернути в активні")
+    if product.status in ("sold", "reserved"):
+        raise HTTPException(status_code=400, detail="Проданий або зарезервований товар не можна повернути в активні")
     product.status = "active"
     sync_product_activity(product)
     db.commit()
@@ -1718,6 +1925,11 @@ def admin_delete_product(product_id: int, current_admin_id: int = Query(...), db
     product = db.query(models.Product).filter(models.Product.id == product_id).first()
     if not product:
         raise HTTPException(status_code=404, detail="Товар не знайдено")
+    if product.status == "reserved":
+        raise HTTPException(status_code=400, detail="Товар зарезервовано в активній угоді")
+    has_history = db.query(models.Order).filter(models.Order.product_id == product.id).first() or db.query(models.Report).filter(models.Report.listing_id == product.id).first()
+    if has_history:
+        raise HTTPException(status_code=400, detail="Товар має історію угод або скарг. Перенесіть його в архів замість повного видалення")
 
     db.query(models.ProductImage).filter(models.ProductImage.product_id == product.id).delete()
     db.query(models.CartItem).filter(models.CartItem.product_id == product.id).delete()
@@ -1768,22 +1980,69 @@ def create_suggestion(data: schemas.SuggestionCreate, db: Session = Depends(get_
 
 @app.post("/reports")
 def create_report(data: schemas.ReportCreate, db: Session = Depends(get_db)):
-    user = db.query(models.User).filter(models.User.id == data.reporter_id).first()
-    product = db.query(models.Product).filter(models.Product.id == data.listing_id).first()
-    if not user:
+    reporter = db.query(models.User).filter(models.User.id == data.reporter_id).first()
+    if not reporter:
         raise HTTPException(status_code=404, detail="Користувача не знайдено")
-    ensure_not_banned(user)
-    if not product:
-        raise HTTPException(status_code=404, detail="Оголошення не знайдено")
+    ensure_not_banned(reporter)
+
+    report_type = normalize_text(data.report_type).lower() or "listing"
+    if report_type not in {"listing", "profile", "order"}:
+        raise HTTPException(status_code=400, detail="Некоректний тип скарги")
+
     reason = normalize_text(data.reason)
-    allowed = {"Шахрайство", "Неправдивий опис", "Заборонений товар", "Спам", "Інше"}
+    allowed = {
+        "Шахрайство", "Неправдивий опис", "Заборонений товар", "Спам", "Інше",
+        "Підозрілий профіль", "Образи або небажана поведінка",
+        "Не отримав товар", "Покупець не підтверджує отримання",
+    }
     if reason not in allowed:
         raise HTTPException(status_code=400, detail="Некоректна причина")
     comment = normalize_text(data.comment) or None
     if reason == "Інше" and not comment:
         raise HTTPException(status_code=400, detail="Опишіть причину скарги")
-    item = models.Report(reporter_id=user.id, listing_id=product.id, reason=reason, comment=comment, status="new")
-    db.add(item)
+
+    listing_id = data.listing_id
+    reported_user_id = data.reported_user_id
+    order_id = data.order_id
+
+    if report_type == "listing":
+        if not listing_id:
+            raise HTTPException(status_code=400, detail="Оголошення не знайдено")
+        product = db.query(models.Product).filter(models.Product.id == listing_id).first()
+        if not product:
+            raise HTTPException(status_code=404, detail="Оголошення не знайдено")
+        reported_user_id = product.seller_id
+    elif report_type == "profile":
+        if not reported_user_id:
+            raise HTTPException(status_code=400, detail="Профіль не знайдено")
+        target = db.query(models.User).filter(models.User.id == reported_user_id).first()
+        if not target:
+            raise HTTPException(status_code=404, detail="Профіль не знайдено")
+        if target.id == reporter.id:
+            raise HTTPException(status_code=400, detail="Не можна поскаржитися на власний профіль")
+        listing_id = None
+        order_id = None
+    else:
+        if not order_id:
+            raise HTTPException(status_code=400, detail="Угоду не знайдено")
+        order = db.query(models.Order).filter(models.Order.id == order_id).first()
+        if not order:
+            raise HTTPException(status_code=404, detail="Угоду не знайдено")
+        if reporter.id not in {order.buyer_id, order.seller_id}:
+            raise HTTPException(status_code=403, detail="Ця угода вам не належить")
+        listing_id = order.product_id
+        reported_user_id = order.seller_id if reporter.id == order.buyer_id else order.buyer_id
+
+    create_report_record(
+        db,
+        reporter_id=reporter.id,
+        report_type=report_type,
+        reason=reason,
+        comment=comment,
+        listing_id=listing_id,
+        reported_user_id=reported_user_id,
+        order_id=order_id,
+    )
     db.commit()
     return {"message": "Скаргу надіслано"}
 
@@ -1817,6 +2076,8 @@ def admin_update_suggestion_status(suggestion_id: int, data: schemas.SuggestionS
     mapping = {"new": "new", "review": "review", "done": "done"}
     if status not in mapping:
         raise HTTPException(status_code=400, detail="Некоректний статус")
+    if item.report_type == "order" and status == "done":
+        raise HTTPException(status_code=400, detail="Для спору щодо угоди оберіть рішення: завершити, скасувати або повернути на підтвердження")
     item.status = mapping[status]
     db.commit()
     log_admin_action(db, current_admin_id, f"suggestion-status {status} #{item.id}", "suggestion", item.id)
@@ -1829,18 +2090,28 @@ def admin_list_reports(current_admin_id: int = Query(...), db: Session = Depends
     items = db.query(models.Report).order_by(models.Report.id.desc()).all()
     result = []
     for item in items:
-        user = db.query(models.User).filter(models.User.id == item.reporter_id).first()
-        product = db.query(models.Product).filter(models.Product.id == item.listing_id).first()
+        reporter = db.query(models.User).filter(models.User.id == item.reporter_id).first()
+        reported_user = db.query(models.User).filter(models.User.id == item.reported_user_id).first() if item.reported_user_id else None
+        product = db.query(models.Product).filter(models.Product.id == item.listing_id).first() if item.listing_id else None
+        order = db.query(models.Order).filter(models.Order.id == item.order_id).first() if item.order_id else None
         result.append({
             "id": item.id,
+            "report_type": item.report_type or "listing",
             "listing_id": item.listing_id,
-            "listing_title": product.title if product else f"Оголошення #{item.listing_id}",
+            "listing_title": product.title if product else (f"Оголошення #{item.listing_id}" if item.listing_id else None),
+            "order_id": item.order_id,
+            "order_status": order.status if order else None,
             "status": item.status,
             "reason": item.reason,
             "comment": item.comment,
             "created_at": item.created_at.isoformat() if item.created_at else None,
+            "resolved_at": item.resolved_at.isoformat() if item.resolved_at else None,
             "reporter_id": item.reporter_id,
-            "reporter_username": user.username if user else None,
+            "reporter_username": reporter.username if reporter else None,
+            "reporter_full_name": reporter.full_name if reporter else None,
+            "reported_user_id": item.reported_user_id,
+            "reported_username": reported_user.username if reported_user else None,
+            "reported_full_name": reported_user.full_name if reported_user else None,
         })
     return result
 
@@ -1856,9 +2127,76 @@ def admin_update_report_status(report_id: int, data: schemas.ReportStatusUpdate,
     if status not in mapping:
         raise HTTPException(status_code=400, detail="Некоректний статус")
     item.status = mapping[status]
+    item.resolved_at = datetime.utcnow() if status == "done" else None
     db.commit()
     log_admin_action(db, current_admin_id, f"report-status {status} #{item.id}", "report", item.id)
     return {"message": "Статус скарги оновлено"}
+
+
+@app.post("/admin/reports/{report_id}/resolve")
+def admin_resolve_order_report(report_id: int, data: schemas.ReportResolution, current_admin_id: int = Query(...), db: Session = Depends(get_db)):
+    require_admin(db, current_admin_id)
+    item = db.query(models.Report).filter(models.Report.id == report_id).first()
+    if not item:
+        raise HTTPException(status_code=404, detail="Скаргу не знайдено")
+
+    action = normalize_text(data.action).lower()
+    if action not in {"complete", "cancel", "return"}:
+        raise HTTPException(status_code=400, detail="Некоректна дія")
+    if item.report_type != "order" or not item.order_id:
+        raise HTTPException(status_code=400, detail="Це не спір щодо угоди")
+
+    order = db.query(models.Order).filter(models.Order.id == item.order_id).first() if item.order_id else None
+    product = db.query(models.Product).filter(models.Product.id == order.product_id).first() if order else None
+    now = datetime.utcnow()
+
+    if not order:
+        raise HTTPException(status_code=400, detail="До цієї скарги не прив'язано угоду")
+
+    if action == "complete":
+        order.status = "completed"
+        order.completed_at = now
+        if product:
+            product.status = "sold"
+            sync_product_activity(product)
+    elif action == "cancel":
+        order.status = "cancelled"
+        if product and product.status == "reserved":
+            product.status = "active"
+            sync_product_activity(product)
+    elif action == "return":
+        order.status = "awaiting_buyer_confirmation"
+        order.dispute_at = None
+        if product:
+            product.status = "reserved"
+            sync_product_activity(product)
+
+    item.status = "done"
+    item.resolved_at = now
+
+    if order:
+        buyer = db.query(models.User).filter(models.User.id == order.buyer_id).first()
+        seller = db.query(models.User).filter(models.User.id == order.seller_id).first() if order.seller_id else None
+        action_messages = {
+            "complete": "Адміністратор завершив угоду",
+            "cancel": "Адміністратор скасував угоду",
+            "return": "Угоду повернуто на підтвердження покупця",
+        }
+        for user in (buyer, seller):
+            if user:
+                create_notification(
+                    db,
+                    user.id,
+                    "Рішення адміністратора",
+                    action_messages[action],
+                    "order",
+                    related_order_id=order.id,
+                    related_product_id=order.product_id,
+                )
+
+    db.commit()
+    log_admin_action(db, current_admin_id, f"resolve report #{item.id}: {action}", "report", item.id)
+    return {"message": "Рішення застосовано"}
 
 
 @app.post("/favorites")
